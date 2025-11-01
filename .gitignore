@@ -1,0 +1,17 @@
+.idea/
+*.iml
+*.iws
+
+# Environment variables
+.env
+.env.local
+venv/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db
