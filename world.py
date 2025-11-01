@@ -213,3 +213,119 @@ def aplop(state: Tuple, agent: str) -> Set[str]:
             applicable_operators.add('dropoff')
 
     return applicable_operators
+
+
+# a decision will be made after receiving the result from aplop() then call apply()
+
+
+def apply(state: Tuple, action: str, agent: str) -> Tuple[Tuple, int]:
+    """
+    Apply the given action for the specified agent, returning new state and reward.
+
+    This function assumes the action is applicable (should be checked by aplop first).
+
+    see get_initial_state() for explanation of letter variables
+
+    Args:
+        state: Current full state tuple
+        action: Action to apply ('north', 'south', 'east', 'west', 'pickup', 'dropoff')
+        agent: Which agent is acting ('F' or 'M')
+
+    Returns:
+        Tuple[Tuple, int]: (new_state, reward)
+            - new_state: Updated state tuple after action
+            - reward: Immediate reward for this action
+    """
+    # unpack the state
+    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
+
+    # Start with current state values
+    new_i, new_j = i, j
+    new_i_prime, new_j_prime = i_prime, j_prime
+    new_x, new_x_prime = x, x_prime
+    new_a, new_b, new_c, new_d, new_e, new_f = a, b, c, d, e, f
+
+    # Default reward
+    reward = 0
+
+    # Determine which agent to move
+    if agent == 'F': # female
+        agent_row, agent_col = i, j
+        agent_carrying = x
+    else:  # male
+        agent_row, agent_col = i_prime, j_prime
+        agent_carrying = x_prime
+
+    # Execute action
+    if action == 'north':
+        # decrease row (up)
+        if agent == 'F':
+            new_i = agent_row - 1
+        else:
+            new_i_prime = agent_row - 1
+        reward = REWARD_MOVE
+
+    elif action == 'south':
+        # increase row (down)
+        if agent == 'F':
+            new_i = agent_row + 1
+        else:
+            new_i_prime = agent_row + 1
+        reward = REWARD_MOVE
+
+    elif action == 'east':
+        # increase column (right)
+        if agent == 'F':
+            new_j = agent_col + 1
+        else:
+            new_j_prime = agent_col + 1
+        reward = REWARD_MOVE
+
+    elif action == 'west':
+        # decrease column (left)
+        if agent == 'F':
+            new_j = agent_col - 1
+        else:
+            new_j_prime = agent_col - 1
+        reward = REWARD_MOVE
+
+    elif action == 'pickup':
+        # Set carrying status to 1
+        if agent == 'F':
+            new_x = 1
+        else:
+            new_x_prime = 1
+
+        # Decrease block count of pickup location
+        if (agent_row, agent_col) == (3, 5):
+            new_d = d - 1
+        elif (agent_row, agent_col) == (4, 2):
+            new_e = e - 1
+
+        reward = REWARD_PICKUP
+
+    elif action == 'dropoff':
+        # Set carrying status to 0
+        if agent == 'F':
+            new_x = 0
+        else:
+            new_x_prime = 0
+
+        # Increase block count of the dropoff location
+        if (agent_row, agent_col) == (1, 1):
+            new_a = a + 1
+        elif (agent_row, agent_col) == (1, 5):
+            new_b = b + 1
+        elif (agent_row, agent_col) == (3, 3):
+            new_c = c + 1
+        elif (agent_row, agent_col) == (5, 5):
+            new_f = f + 1
+
+        reward = REWARD_DROPOFF
+
+    # Update state of the world
+    new_state = (new_i, new_j, new_i_prime, new_j_prime,
+                 new_x, new_x_prime, new_a, new_b, new_c,
+                 new_d, new_e, new_f)
+
+    return new_state, reward
