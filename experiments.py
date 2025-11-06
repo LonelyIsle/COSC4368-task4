@@ -85,7 +85,6 @@ def rollout(
     terminals = 0
 
     # episode buffers
-    episode_states: List[State] = [state]
     episode_rewards = 0.0
     episode_steps = 0
     episode_dist_sum = 0
@@ -110,7 +109,6 @@ def rollout(
         episode_steps += 1
         episode_rewards += reward
         episode_dist_sum += manhattan_between_agents(next_state)
-        episode_states.append(next_state)
 
         if learner == 'q':
             next_actions = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
@@ -131,7 +129,6 @@ def rollout(
             episodes.append(EpisodeLog(steps=episode_steps, total_reward=episode_rewards, avg_manhattan=avg_manh))
             # new episode, keep Q-table
             state = W.reset(seed + terminals)   # small perturbation per episode
-            episode_states = [state]
             episode_rewards = 0.0
             episode_steps = 0
             episode_dist_sum = 0
@@ -169,7 +166,6 @@ def run_experiment4(seed: int, base: str = 'q') -> RunResult:
     warmup_steps = 500
     learner = 'q' if base == 'q' else 'sarsa'
 
-    episode_states: List[State] = [state]
     episode_rewards = 0.0
     episode_steps = 0
     episode_dist_sum = 0
@@ -193,7 +189,6 @@ def run_experiment4(seed: int, base: str = 'q') -> RunResult:
         episode_steps += 1
         episode_rewards += reward
         episode_dist_sum += manhattan_between_agents(next_state)
-        episode_states.append(next_state)
 
         if learner == 'q':
             next_actions = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
@@ -217,7 +212,6 @@ def run_experiment4(seed: int, base: str = 'q') -> RunResult:
                 W.set_pickups([(1, 2), (4, 5)])  # change pickups, keep Q
 
             state = W.reset(seed + terminals)
-            episode_states = [state]
             episode_rewards = 0.0
             episode_steps = 0
             episode_dist_sum = 0
@@ -247,7 +241,7 @@ def two_runs_exp3(base: str = 'q', seed_a: int = 13, seed_b: int = 29):
 def two_runs_exp4(base: str = 'q', seed_a: int = 17, seed_b: int = 31):
     return two_runs(lambda s: run_experiment4(s, base=base), seed_a, seed_b)
 
-# ---- Pretty summary ----
+# ---- Summaries / samples ----
 def summarize_run(run: RunResult) -> str:
     lines = [
         f"Seed: {run.seed}",
@@ -261,12 +255,21 @@ def summarize_run(run: RunResult) -> str:
         lines += [
             f"Avg Reward/episode: {avg_reward:.2f}",
             f"Avg Steps/episode: {avg_len:.1f}",
-            f"Avg Manhattan/step: {avg_manh:.2f}",
+            f"Avg Manhattan/episode: {avg_manh:.2f}",
         ]
     return "\n".join(lines)
+
+def sample_q_entries(run: RunResult, top_n: int = 10):
+    """Return top-N ((state, action), q) pairs by Q value for quick inspection."""
+    items = [((s, a), q) for (s, a), q in run.Q.items()]
+    items.sort(key=lambda kv: kv[1], reverse=True)
+    return items[:top_n]
 
 if __name__ == "__main__":
     # smoke test (comment out if you prefer)
     r1a, r1b = two_runs_exp1_pgreedy()
     print("=== Exp1(c) PGREEDY ===")
     print(summarize_run(r1a)); print(summarize_run(r1b))
+    print("Top Q entries (A):")
+    for ((s, a), q) in sample_q_entries(r1a, 5):
+        print(a, f"{q:8.3f}", s)

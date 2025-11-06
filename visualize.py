@@ -1,8 +1,9 @@
 # visualize.py
 # Matplotlib-only helpers for world snapshots, episode traces, distance, and Q arrows.
-# IMPORTANT: One chart per function (no subplots), no seaborn, no custom colors.
+# Works in headless terminals by default: plots are saved to PNGs if show=False.
 
-from typing import Dict, Iterable, List, Tuple, Callable, Any
+from typing import Dict, Iterable, List, Tuple, Callable, Any, Sequence
+import os
 import math
 import matplotlib.pyplot as plt
 
@@ -11,6 +12,17 @@ State = Tuple  # (i, j, i', j', x, x', a, b, c, d, e, f)
 
 # --- You can tweak these defaults if needed ---
 DEFAULT_GRID = (5, 5)
+
+# ---------- internal helpers ----------
+def _maybe_save_or_show(fig, show: bool, outdir: str | None, name: str):
+    if show:
+        plt.show(block=True)
+    else:
+        os.makedirs(outdir or "plots", exist_ok=True)
+        path = os.path.join(outdir or "plots", f"{name}.png")
+        fig.savefig(path, bbox_inches="tight", dpi=150)
+        plt.close(fig)
+        print(f"[saved] {path}")
 
 def extract_positions_from_state(state: State) -> Tuple[GridPos, GridPos]:
     # Matches your state: (i, j, i', j', ...)
@@ -27,13 +39,17 @@ def _draw_grid(ax, width: int, height: int):
     ax.set_xlabel('col')
     ax.set_ylabel('row')
 
+# ---------- world snapshots / traces ----------
 def plot_world(
     state: State,
     grid_size: Tuple[int, int] = DEFAULT_GRID,
     pickup_cells: Iterable[GridPos] = ((3, 5), (4, 2)),
     dropoff_cells: Iterable[GridPos] = ((1, 1), (1, 5), (3, 3), (5, 5)),
     position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'PD-World snapshot'
+    title: str = 'PD-World snapshot',
+    show: bool = False,
+    outdir: str | None = None,
+    name: str = "world"
 ):
     width, height = grid_size
     f_pos, m_pos = position_extractor(state)
@@ -51,7 +67,7 @@ def plot_world(
 
     ax.legend(loc='upper right')
     ax.set_title(title)
-    plt.show()
+    _maybe_save_or_show(fig, show, outdir, name)
 
 def plot_episode_trace(
     states: List[State],
@@ -59,7 +75,10 @@ def plot_episode_trace(
     pickup_cells: Iterable[GridPos] = ((3, 5), (4, 2)),
     dropoff_cells: Iterable[GridPos] = ((1, 1), (1, 5), (3, 3), (5, 5)),
     position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'Episode trace (agent paths)'
+    title: str = 'Episode trace (agent paths)',
+    show: bool = False,
+    outdir: str | None = None,
+    name: str = "trace"
 ):
     width, height = grid_size
     fig, ax = plt.subplots()
@@ -93,25 +112,34 @@ def plot_episode_trace(
 
     ax.legend(loc='upper right')
     ax.set_title(title)
-    plt.show()
+    _maybe_save_or_show(fig, show, outdir, name)
 
-def plot_distance_over_time(
-    states: List[State],
-    position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'Agent Manhattan distance over time'
-):
-    distances: List[int] = []
-    for s in states:
-        (fr, fc), (mr, mc) = position_extractor(s)
-        distances.append(abs(fr - mr) + abs(fc - mc))
-
+# ---------- learning curves (per EPISODE) ----------
+def plot_reward_per_episode(episodes, show: bool = False, outdir: str | None = None, name: str = "reward_per_episode"):
     fig, ax = plt.subplots()
-    ax.plot(range(len(distances)), distances)
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Manhattan distance')
-    ax.set_title(title)
-    plt.show()
+    rewards = [e.total_reward for e in episodes]
+    ax.plot(range(1, len(rewards) + 1), rewards)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Total reward")
+    ax.set_title("Reward per episode")
+    _maybe_save_or_show(fig, show, outdir, name)
 
+def plot_steps_per_episode(episodes, show: bool = False, outdir: str | None = None, name: str = "steps_per_episode"):
+    fig, ax = plt.subplots()
+    steps = [e.steps for e in episodes]
+    ax.plot(range(1, len(steps) + 1), steps)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Steps")
+    ax.set_title("Steps per episode")
+    _maybe_save_or_show(fig, show, outdir, name)
+
+def plot_avg_manhattan_per_episode(episodes, show: bool = False, outdir: str | None = None, name: str = "avg_manhattan_per_episode"):
+    fig, ax = plt.subplots()
+    dists = [e.avg_manhattan for e in episodes]
+    ax.plot(range(1, len(dists) + 1), dists)
+    ax.set_xlabel("Episode"); ax.set_ylabel("Avg Manhattan distance")
+    ax.set_title("Average Manhattan distance per episode")
+    _maybe_save_or_show(fig, show, outdir, name)
+
+# ---------- Q-table arrows ----------
 def _arrow_for_action(action: str) -> Tuple[float, float]:
     if action == 'north':  return (0, -0.3)
     if action == 'south':  return (0,  0.3)
@@ -125,7 +153,10 @@ def plot_q_arrows(
     for_agent: str = 'F',
     position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
     title: str = 'Greedy action by cell from Q-table',
-    show_values: bool = True
+    show_values: bool = True,
+    show: bool = False,
+    outdir: str | None = None,
+    name: str = "q_arrows"
 ):
     # Aggregate across all states that place the chosen agent at (row,col)
     width, height = grid_size
@@ -149,4 +180,38 @@ def plot_q_arrows(
             ax.text(col, row, f"{q:.2f}", ha='center', va='center')
 
     ax.set_title(title + f" (agent={for_agent})")
-    plt.show()
+    _maybe_save_or_show(fig, show, outdir, f"{name}_{for_agent}")
+
+# ---------- wrapper ----------
+def visualize_run_package(
+    run,
+    grid_size: Tuple[int, int] = DEFAULT_GRID,
+    initial_state: State | None = None,
+    pickup_cells: Iterable[GridPos] = (),
+    dropoff_cells: Iterable[GridPos] = (),
+    show: bool = False,
+    outdir: str | None = None,
+    prefix: str = "run"
+):
+    # learning curves
+    if run.episodes:
+        plot_reward_per_episode(run.episodes, show, outdir, f"{prefix}_reward")
+        plot_steps_per_episode(run.episodes, show, outdir, f"{prefix}_steps")
+        plot_avg_manhattan_per_episode(run.episodes, show, outdir, f"{prefix}_avg_manhattan")
+
+    # world snapshot if provided
+    if initial_state is not None:
+        plot_world(
+            initial_state,
+            grid_size=grid_size,
+            pickup_cells=pickup_cells or ((3, 5), (4, 2)),
+            dropoff_cells=dropoff_cells or ((1, 1), (1, 5), (3, 3), (5, 5)),
+            title="Initial World State",
+            show=show,
+            outdir=outdir,
+            name=f"{prefix}_world",
+        )
+
+    # Q arrows for both agents
+    plot_q_arrows(run.Q, grid_size=grid_size, for_agent='F', title="Greedy Policy Arrows", show=show, outdir=outdir, name=f"{prefix}_q")
+    plot_q_arrows(run.Q, grid_size=grid_size, for_agent='M', title="Greedy Policy Arrows", show=show, outdir=outdir, name=f"{prefix}_q")

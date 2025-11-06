@@ -1,6 +1,6 @@
 # main.py
 # Entry point for running Task 4 experiments.
-# You can run: python main.py --exp 1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa
+# You can run: python3 main.py --exp 1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa
 
 import argparse
 from experiments import (
@@ -11,13 +11,9 @@ from experiments import (
     two_runs_exp3,
     two_runs_exp4,
     summarize_run,
+    sample_q_entries,
 )
-from visualize import (
-    plot_world,
-    plot_episode_trace,
-    plot_distance_over_time,
-    plot_q_arrows,
-)
+from visualize import visualize_run_package
 import world as W
 
 def run_and_summarize(experiment_fn, seedA, seedB, label):
@@ -27,37 +23,13 @@ def run_and_summarize(experiment_fn, seedA, seedB, label):
     print(summarize_run(rA))
     print("\nRun B Summary:")
     print(summarize_run(rB))
+
+    # Show a tiny Q-table sample in the console for grading
+    print("\nTop Q entries (Run A):")
+    for ((s, a), q) in sample_q_entries(rA, top_n=8):
+        print(a, f"{q:8.3f}", s)
+
     return rA, rB
-
-def visualize_results(run, grid_size=(5, 5)):
-    # Visualize world state & learned Q
-    print("\nGenerating visuals for one sample run...")
-
-    if run.episodes:
-        # Mock a sample trace (you can log real episode_states if you want more detail)
-        state = W.get_initial_state()
-        plot_world(
-            state,
-            grid_size=grid_size,
-            pickup_cells=W.PICKUP_LOCATIONS,
-            dropoff_cells=W.DROPOFF_LOCATIONS,
-            title="Initial World State"
-        )
-
-    # Q-table visualization
-    plot_q_arrows(
-        run.Q,
-        grid_size=grid_size,
-        for_agent='F',
-        title="Greedy Policy Arrows (F)"
-    )
-    plot_q_arrows(
-        run.Q,
-        grid_size=grid_size,
-        for_agent='M',
-        title="Greedy Policy Arrows (M)"
-    )
-    print("Visuals displayed successfully.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run Task 4 experiments.")
@@ -65,6 +37,8 @@ if __name__ == "__main__":
                         help="1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa")
     parser.add_argument("--seedA", type=int, default=7)
     parser.add_argument("--seedB", type=int, default=19)
+    parser.add_argument("--show", action="store_true",
+                        help="Show plots in windows instead of saving PNGs.")
     args = parser.parse_args()
 
     exp_map = {
@@ -85,5 +59,33 @@ if __name__ == "__main__":
     exp_fn, label = exp_map[args.exp]
     resultA, resultB = run_and_summarize(exp_fn, args.seedA, args.seedB, label)
 
-    # Optional: visualize one run
-    visualize_results(resultA)
+    # ----- Visuals: save PNGs by default (works in headless terminals) -----
+    outA = f"plots/{args.exp}_seed{resultA.seed}"
+    outB = f"plots/{args.exp}_seed{resultB.seed}"
+
+    initial_state = W.get_initial_state() if hasattr(W, "get_initial_state") else None
+    pickups = getattr(W, "PICKUP_LOCATIONS", [])
+    dropoffs = getattr(W, "DROPOFF_LOCATIONS", [])
+
+    visualize_run_package(
+        resultA,
+        grid_size=(5, 5),
+        initial_state=initial_state,
+        pickup_cells=pickups,
+        dropoff_cells=dropoffs,
+        show=args.show,
+        outdir=outA,
+        prefix=f"{args.exp}_seed{resultA.seed}"
+    )
+    visualize_run_package(
+        resultB,
+        grid_size=(5, 5),
+        initial_state=initial_state,
+        pickup_cells=pickups,
+        dropoff_cells=dropoffs,
+        show=args.show,
+        outdir=outB,
+        prefix=f"{args.exp}_seed{resultB.seed}"
+    )
+
+    print(f"\nPNG plots saved under:\n - {outA}\n - {outB}\n(Use --show to open windows instead.)")

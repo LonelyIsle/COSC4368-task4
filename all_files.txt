@@ -1,5 +1,3 @@
-/home/wstewart/Desktop/COSC4368-task4/README.md
-# COSC4368-task4
 /home/wstewart/Desktop/COSC4368-task4/world.py
 # world.py
 # PD-World: 2-agent block transport environment
@@ -1089,6 +1087,20 @@ if __name__ == "__main__":
     r1a, r1b = two_runs_exp1_pgreedy()
     print("=== Exp1(c) PGREEDY ===")
     print(summarize_run(r1a)); print(summarize_run(r1b))
+/home/wstewart/Desktop/COSC4368-task4/README.md
+# COSC4368-task4
+
+```
+python3 main.py --exp 1b
+python3 main.py --exp 1c
+python3 main.py --exp 1d
+python3 main.py --exp 2
+python3 main.py --exp 3q
+python3 main.py --exp 3sarsa
+python3 main.py --exp 4q
+python3 main.py --exp 4sarsa
+```
+
 /home/wstewart/Desktop/COSC4368-task4/__pycache__/q_learning.cpython-313.pyc
 �
 
