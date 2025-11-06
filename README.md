@@ -1,5 +1,6 @@
 # COSC4368-task4
 
+# Reinforcement Learning to Discover Paths in a 2-Agent Transportation World
 ```
 python3 main.py --exp 1b
 python3 main.py --exp 1c
