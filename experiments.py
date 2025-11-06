@@ -174,7 +174,7 @@ def run_experiment4(seed: int, base: str = 'q') -> RunResult:
     def pick_policy():
         if step_count < warmup_steps:
             return P.prandom
-        return P.pgreedy
+        return P.pexploit
 
     # generous cap to avoid infinite loops
     while terminals < 6 and step_count < 20000:
