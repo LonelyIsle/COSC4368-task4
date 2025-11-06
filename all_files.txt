@@ -1,1653 +1,0 @@
-/home/wstewart/Desktop/COSC4368-task4/world.py
-# world.py
-# PD-World: 2-agent block transport environment
-# State format: (i, j, i', j', x, x', a, b, c, d, e, f)
-#   (i, j)   : Female agent position (row, col) in 1..GRID_SIZE
-#   (i', j') : Male agent position (row, col)
-#   x, x'    : Carry flags (0/1) for F and M
-#   a, b, c  : Blocks at dropoffs (1,1), (1,5), (3,3)
-#   d, e     : Blocks at the 2 pickup "slots" (mapped to current PICKUP_LOCATIONS[0/1])
-#   f        : Blocks at dropoff (5,5)
-
-import random
-from typing import Tuple, Set, Dict, List
-
-# ===========================================================
-# World configuration
-# ===========================================================
-
-GRID_SIZE = 5  # valid rows/cols are 1..5 inclusive
-
-# These coordinates can change during Exp 4 via set_pickups()
-PICKUP_LOCATIONS: List[Tuple[int, int]] = [(3, 5), (4, 2)]
-
-# Dropoffs are fixed
-DROPOFF_LOCATIONS: List[Tuple[int, int]] = [(1, 1), (1, 5), (3, 3), (5, 5)]
-
-# Capacities and initial counts
-DROPOFF_CAPACITY = 5
-INITIAL_PICKUP_BLOCKS = 10  # for both pickup slots at start
-
-# Actions
-ACTIONS = ['north', 'south', 'east', 'west', 'pickup', 'dropoff']
-
-# Rewards
-REWARD_MOVE = -1
-REWARD_PICKUP = 13
-REWARD_DROPOFF = 13
-
-
-# ===========================================================
-# State helpers
-# ===========================================================
-
-def get_initial_state() -> Tuple:
-    """
-    Initial state:
-      F at (1,3), M at (5,3), both not carrying;
-      dropoffs a,b,c,f start at 0;
-      pickup-slot counts d,e start at 10 each.
-    """
-    # (i, j,  i', j',  x, x',  a, b, c,  d,  e,  f)
-    return (1, 3,   5, 3,   0, 0,   0, 0, 0,  10, 10,  0)
-
-
-def is_terminal_state(state: Tuple) -> bool:
-    """
-    Terminal when all dropoffs hit capacity: a=b=c=f=5.
-    """
-    _, _, _, _, _, _, a, b, c, _, _, f = state
-    return (a == DROPOFF_CAPACITY
-            and b == DROPOFF_CAPACITY
-            and c == DROPOFF_CAPACITY
-            and f == DROPOFF_CAPACITY)
-
-
-def get_agent_position(state: Tuple, agent: str) -> Tuple[int, int]:
-    """
-    Return (row, col) for agent 'F' or 'M'.
-    """
-    i, j, i_p, j_p, *_ = state
-    return (i, j) if agent == 'F' else (i_p, j_p)
-
-
-def get_agent_carrying(state: Tuple, agent: str) -> int:
-    """
-    Return carry flag (0/1) for agent 'F' or 'M'.
-    """
-    _, _, _, _, x, x_p, *_ = state
-    return x if agent == 'F' else x_p
-
-
-def get_block_counts(state: Tuple) -> Dict[str, int]:
-    """
-    Human-readable dict of block counts at sites.
-    """
-    *_, a, b, c, d, e, f = state
-    return {
-        'dropoff_1_1': a,
-        'dropoff_1_5': b,
-        'dropoff_3_3': c,
-        'pickup_slot0': d,  # mapped to PICKUP_LOCATIONS[0]
-        'pickup_slot1': e,  # mapped to PICKUP_LOCATIONS[1]
-        'dropoff_5_5': f,
-    }
-
-
-# ===========================================================
-# Action applicability
-# ===========================================================
-
-def aplop(state: Tuple, agent: str) -> Set[str]:
-    """
-    Applicable operators for agent in current state.
-    Enforces:
-      - 1..GRID_SIZE boundaries
-      - no occupying same cell
-      - pickup only at pickup cells with stock and not carrying
-      - dropoff only at dropoff cells with capacity and carrying
-    """
-    i, j, i_p, j_p, x, x_p, a, b, c, d, e, f = state
-
-    if agent == 'F':
-        r, col = i, j
-        carrying = x
-        other_r, other_c = i_p, j_p
-    else:
-        r, col = i_p, j_p
-        carrying = x_p
-        other_r, other_c = i, j
-
-    ops: Set[str] = set()
-
-    # Move north
-    if r > 1 and not (r - 1 == other_r and col == other_c):
-        ops.add('north')
-    # Move south
-    if r < GRID_SIZE and not (r + 1 == other_r and col == other_c):
-        ops.add('south')
-    # Move east
-    if col < GRID_SIZE and not (r == other_r and col + 1 == other_c):
-        ops.add('east')
-    # Move west
-    if col > 1 and not (r == other_r and col - 1 == other_c):
-        ops.add('west')
-
-    # Pickup (dynamic positions)
-    if carrying == 0:
-        if (r, col) == tuple(PICKUP_LOCATIONS[0]) and d > 0:
-            ops.add('pickup')
-        elif (r, col) == tuple(PICKUP_LOCATIONS[1]) and e > 0:
-            ops.add('pickup')
-
-    # Dropoff (fixed positions)
-    if carrying == 1:
-        if (r, col) == (1, 1) and a < DROPOFF_CAPACITY:
-            ops.add('dropoff')
-        elif (r, col) == (1, 5) and b < DROPOFF_CAPACITY:
-            ops.add('dropoff')
-        elif (r, col) == (3, 3) and c < DROPOFF_CAPACITY:
-            ops.add('dropoff')
-        elif (r, col) == (5, 5) and f < DROPOFF_CAPACITY:
-            ops.add('dropoff')
-
-    return ops
-
-
-# ===========================================================
-# Transition
-# ===========================================================
-
-def apply(state: Tuple, action: str, agent: str) -> Tuple[Tuple, int]:
-    """
-    Apply action for the given agent. Assumes action is applicable.
-    Returns (new_state, reward).
-    """
-    i, j, i_p, j_p, x, x_p, a, b, c, d, e, f = state
-
-    # copy locals
-    new_i, new_j = i, j
-    new_i_p, new_j_p = i_p, j_p
-    new_x, new_x_p = x, x_p
-    new_a, new_b, new_c, new_d, new_e, new_f = a, b, c, d, e, f
-
-    # Current agent snapshot
-    if agent == 'F':
-        r, col = i, j
-        carrying = x
-    else:
-        r, col = i_p, j_p
-        carrying = x_p
-
-    reward = 0
-
-    if action == 'north':
-        if agent == 'F':
-            new_i = r - 1
-        else:
-            new_i_p = r - 1
-        reward = REWARD_MOVE
-
-    elif action == 'south':
-        if agent == 'F':
-            new_i = r + 1
-        else:
-            new_i_p = r + 1
-        reward = REWARD_MOVE
-
-    elif action == 'east':
-        if agent == 'F':
-            new_j = col + 1
-        else:
-            new_j_p = col + 1
-        reward = REWARD_MOVE
-
-    elif action == 'west':
-        if agent == 'F':
-            new_j = col - 1
-        else:
-            new_j_p = col - 1
-        reward = REWARD_MOVE
-
-    elif action == 'pickup':
-        if agent == 'F':
-            new_x = 1
-        else:
-            new_x_p = 1
-
-        # Decrement whichever pickup slot matches current coordinate
-        if (r, col) == tuple(PICKUP_LOCATIONS[0]):
-            new_d = d - 1
-        elif (r, col) == tuple(PICKUP_LOCATIONS[1]):
-            new_e = e - 1
-
-        reward = REWARD_PICKUP
-
-    elif action == 'dropoff':
-        if agent == 'F':
-            new_x = 0
-        else:
-            new_x_p = 0
-
-        if (r, col) == (1, 1):
-            new_a = a + 1
-        elif (r, col) == (1, 5):
-            new_b = b + 1
-        elif (r, col) == (3, 3):
-            new_c = c + 1
-        elif (r, col) == (5, 5):
-            new_f = f + 1
-
-        reward = REWARD_DROPOFF
-
-    new_state = (
-        new_i, new_j, new_i_p, new_j_p,
-        new_x, new_x_p, new_a, new_b, new_c,
-        new_d, new_e, new_f
-    )
-    return new_state, reward
-
-
-# ===========================================================
-# Adapters for experiment runners
-# ===========================================================
-
-def reset(seed: int = 0):
-    """Reset world and return the initial state. Seed accepted for compatibility."""
-    random.seed(seed)
-    return get_initial_state()
-
-
-def applicable_actions(state: Tuple, agent: str):
-    """Adapter name expected by runners; wraps aplop()."""
-    return aplop(state, agent)
-
-
-def step(state: Tuple, action: str, agent: str):
-    """
-    One environment step for agent. Returns (next_state, reward, done).
-    """
-    next_state, reward = apply(state, action, agent)
-    done = is_terminal_state(next_state)
-    return next_state, reward, done
-
-
-def set_pickups(pickups):
-    """
-    Experiment 4 hook: change pickup coordinates WITHOUT touching d/e counts in the state.
-    The two slot counts (d,e) always map to PICKUP_LOCATIONS[0] and [1], respectively.
-    """
-    global PICKUP_LOCATIONS
-    if not isinstance(pickups, (list, tuple)) or len(pickups) != 2:
-        raise ValueError("set_pickups expects exactly two pickup coordinates, e.g., [(1,2),(4,5)]")
-    PICKUP_LOCATIONS = [tuple(pickups[0]), tuple(pickups[1])]
-/home/wstewart/Desktop/COSC4368-task4/main.py
-# main.py
-# Entry point for running Task 4 experiments.
-# You can run: python main.py --exp 1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa
-
-import argparse
-from experiments import (
-    two_runs_exp1_prandom,
-    two_runs_exp1_pgreedy,
-    two_runs_exp1_pexploit,
-    two_runs_exp2,
-    two_runs_exp3,
-    two_runs_exp4,
-    summarize_run,
-)
-from visualize import (
-    plot_world,
-    plot_episode_trace,
-    plot_distance_over_time,
-    plot_q_arrows,
-)
-import world as W
-
-def run_and_summarize(experiment_fn, seedA, seedB, label):
-    print(f"\n{'=' * 20} {label} {'=' * 20}")
-    rA, rB = experiment_fn(seedA, seedB)
-    print("Run A Summary:")
-    print(summarize_run(rA))
-    print("\nRun B Summary:")
-    print(summarize_run(rB))
-    return rA, rB
-
-def visualize_results(run, grid_size=(5, 5)):
-    # Visualize world state & learned Q
-    print("\nGenerating visuals for one sample run...")
-
-    if run.episodes:
-        # Mock a sample trace (you can log real episode_states if you want more detail)
-        state = W.get_initial_state()
-        plot_world(
-            state,
-            grid_size=grid_size,
-            pickup_cells=W.PICKUP_LOCATIONS,
-            dropoff_cells=W.DROPOFF_LOCATIONS,
-            title="Initial World State"
-        )
-
-    # Q-table visualization
-    plot_q_arrows(
-        run.Q,
-        grid_size=grid_size,
-        for_agent='F',
-        title="Greedy Policy Arrows (F)"
-    )
-    plot_q_arrows(
-        run.Q,
-        grid_size=grid_size,
-        for_agent='M',
-        title="Greedy Policy Arrows (M)"
-    )
-    print("Visuals displayed successfully.")
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Run Task 4 experiments.")
-    parser.add_argument("--exp", required=True,
-                        help="1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa")
-    parser.add_argument("--seedA", type=int, default=7)
-    parser.add_argument("--seedB", type=int, default=19)
-    args = parser.parse_args()
-
-    exp_map = {
-        "1b": (two_runs_exp1_prandom, "Experiment 1(b) - Q-Learning PRANDOM"),
-        "1c": (two_runs_exp1_pgreedy, "Experiment 1(c) - Q-Learning PGREEDY"),
-        "1d": (two_runs_exp1_pexploit, "Experiment 1(d) - Q-Learning PEXPLOIT"),
-        "2": (two_runs_exp2, "Experiment 2 - SARSA (PGREEDY)"),
-        "3q": (lambda a, b: two_runs_exp3(base="q", seed_a=a, seed_b=b), "Experiment 3 - Q-Learning (lower α, γ)"),
-        "3sarsa": (lambda a, b: two_runs_exp3(base="sarsa", seed_a=a, seed_b=b), "Experiment 3 - SARSA (lower α, γ)"),
-        "4q": (lambda a, b: two_runs_exp4(base="q", seed_a=a, seed_b=b), "Experiment 4 - Q-Learning Pickup Switch"),
-        "4sarsa": (lambda a, b: two_runs_exp4(base="sarsa", seed_a=a, seed_b=b), "Experiment 4 - SARSA Pickup Switch"),
-    }
-
-    if args.exp not in exp_map:
-        print("Unknown experiment ID. Use one of: 1b | 1c | 1d | 2 | 3q | 3sarsa | 4q | 4sarsa")
-        exit(1)
-
-    exp_fn, label = exp_map[args.exp]
-    resultA, resultB = run_and_summarize(exp_fn, args.seedA, args.seedB, label)
-
-    # Optional: visualize one run
-    visualize_results(resultA)
-/home/wstewart/Desktop/COSC4368-task4/policies.py
-# policies.py
-from typing import Iterable, Dict, Tuple, List
-import random
-import math
-
-State = Tuple  # your state tuple
-
-def _as_list(actions: Iterable[str]) -> List[str]:
-    lst = list(actions)
-    if not lst:
-        raise ValueError("No applicable actions available.")
-    return lst
-
-def _q(Q: Dict[Tuple[State, str], float], state: State, action: str) -> float:
-    # experiments.py stores Q with keys: (state, action)
-    return Q.get((state, action), 0.0)
-
-def _best_action(Q: Dict[Tuple[State, str], float], state: State, actions: Iterable[str]) -> str:
-    acts = _as_list(actions)
-    best_q = -math.inf
-    best: List[str] = []
-    for a in acts:
-        q = _q(Q, state, a)
-        if q > best_q:
-            best_q = q
-            best = [a]
-        elif q == best_q:
-            best.append(a)
-    return random.choice(best) if best else random.choice(acts)
-
-# ---------------------------
-# Policies used by the project
-# ---------------------------
-
-def prandom(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
-    """
-    PRANDOM: If pickup or dropoff is applicable, do it; otherwise choose random.
-    """
-    acts = _as_list(applicable_actions)
-    if 'pickup' in acts:
-        return 'pickup'
-    if 'dropoff' in acts:
-        return 'dropoff'
-    return random.choice(acts)
-
-def pgreedy(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
-    """
-    PGREEDY: If pickup/dropoff is applicable, do it; otherwise choose argmax-Q (break ties randomly).
-    """
-    acts = _as_list(applicable_actions)
-    if 'pickup' in acts:
-        return 'pickup'
-    if 'dropoff' in acts:
-        return 'dropoff'
-    return _best_action(q_table, state, acts)
-
-def pexploit(state: State, applicable_actions: Iterable[str], q_table: Dict, epsilon: float = 0.2) -> str:
-    """
-    PEXPLOIT: If pickup/dropoff is applicable, do it; otherwise:
-      - with probability (1 - epsilon) pick greedy action
-      - with probability epsilon pick a random applicable action
-    Default epsilon=0.2 matches spec's 80/20 split.
-    """
-    acts = _as_list(applicable_actions)
-    if 'pickup' in acts:
-        return 'pickup'
-    if 'dropoff' in acts:
-        return 'dropoff'
-    if random.random() < epsilon:
-        return random.choice(acts)
-    return _best_action(q_table, state, acts)
-
-# ---------------------------
-# Backward-compatible aliases (your older code can still call these)
-# ---------------------------
-
-def PRandom(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
-    return prandom(state, applicable_actions, q_table)
-
-def PGreedy(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
-    return pgreedy(state, applicable_actions, q_table)
-
-def PExploit(state: State, applicable_actions: Iterable[str], q_table: Dict, epsilon: float = 0.2) -> str:
-    return pexploit(state, applicable_actions, q_table, epsilon=epsilon)
-/home/wstewart/Desktop/COSC4368-task4/q_learning.py
-"""
-Everything in this file is related to Q_learning
-contains the algorithm and the means to update tables
-
-for reference:
-State format: (i, j, i', j', x, x', a, b, c, d, e, f)
-    - (i,j): Female agent position
-    - (i',j'): Male agent position
-    - x: Female carrying block (0 or 1)
-    - x': Male carrying block (0 or 1)
-    - a: blocks in dropoff (1,1)
-    - b: blocks in dropoff (1,5)
-    - c: blocks in dropoff (3,3)
-    - d: blocks in pickup (3,5)
-    - e: blocks in pickup (4,2)
-    - f: blocks in dropoff (5,5)
-"""
-
-import numpy as np
-import random
-from typing import Tuple, Set, Dict
-
-def create_q_table():
-    return {}
-
-
-def set_q_values(q_table: Dict, state: Tuple, action: str, value: float):
-    """
-    q_table: Dictionary storing Q-values
-    state: Simplified state tuple
-    action: Action string
-    value: New Q-value
-    """
-
-    key = (state, action)
-    q_table[key] = value
-
-def get_q_values(q_table: Dict, state: Tuple, action: str) -> float:
-    """
-    q_table: Dictionary storing q-values
-    state: Simplified state tuple (i, j, x, delta_i, delta_j)
-    action: Action string
-    """
-
-    key = (state, action)
-    return q_table.get(key, 0.0) # Return key or 0
-
-def get_best_action(q_table: Dict, state: Tuple, applicable_actions: Set[str]) -> str:
-    """
-    Return action with highest Q-value from applicable actions.
-    Breaks ties randomly.
-
-    q_table: Dictionary storing Q-values
-    state: Simplified state tuple
-    applicable_actions: Set of valid actions
-    """
-    # Get q-values for all applicable actions
-    action_q_vals = {}
-    for action in applicable_actions:
-        q_value = get_q_values(q_table, state, action)
-        action_q_vals[action] = q_value
-
-    # find the max q_value
-    max_value = max(action_q_vals.values())
-
-    # tie-breaker function - if multiple actions have the same value select at random
-    best_action = []
-    for action, q_value in action_q_vals.items():
-        if q_value == max_value:
-            best_action.append(action)
-
-    return random.choice(best_action) # randomly pick action, not an issue if only one option
-
-
-def get_max_q_value(q_table: Dict, state: Tuple, applicable_actions: Set[str]) -> float:
-    """
-    Return the highest Q-value among applicable actions.
-    this function is for returning the number for q-learning formula
-
-    q_table: Dictionary storing Q-values
-    state: Simplified state tuple
-    applicable_actions: Set of valid actions
-
-    """
-    # Safety check
-    if not applicable_actions:
-        return 0.0
-
-    # Get Q-values for all actions
-    q_values = []
-    for action in applicable_actions:
-        q_value = get_q_values(q_table, state, action)
-        q_values.append(q_value)
-
-    # Return the maximum
-    return max(q_values)
-
-def simplify_state(full_state: Tuple, agent: str) -> Tuple:
-    """
-    simplify the state to only use what is needed for the q-learning algorithm
-    refer to the top of this code to see what the full state is and what variables mean what
-    simplified state space : (i, j, x, delta_i, delta_j) is the end result
-        - (i, j) = agent position
-        - x = agent carrying block (boolean)
-        - delta_i, delta_j = Relative row/column position to other agent
-    """
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = full_state
-
-    # determine which agent we are dealing with
-    if agent == 'F': # Female agent
-        delta_i = i - i_prime
-        delta_j = j - j_prime
-        return i, j, x, delta_i, delta_j
-    else: # Male agent
-        delta_i = i_prime - i
-        delta_j = j_prime - j
-        return i_prime, j_prime, x_prime, delta_i, delta_j
-
-def update_q_learning(q_table: Dict,
-                     state: Tuple,
-                     action: str,
-                     reward: float,
-                     next_state: Tuple,
-                     applicable_next_actions: Set[str],
-                     alpha: float,
-                     gamma: float):
-    """
-    Formula: Q(s,a) ← (1-α)*Q(s,a) + α*[R + γ*max Q(s',a')]
-
-    q_table: Dictionary storing Q-values
-        state: Current simplified state
-        action: Action taken
-        reward: Immediate reward received
-        next_state: Next simplified state
-        applicable_next_actions: Set of valid actions in next state
-        alpha: Learning rate (0 < α ≤ 1)
-        gamma: Discount factor (0 ≤ γ ≤ 1)
-
-        note from slides:
-            "a’ has to be an applicable operator in s’; e.g. pickup and drop-off are not
-            applicable in a pickup/dropoff states if empty/full! The q-values of
-            non-applicable operators are therefore not considered! "
-    """
-    old_q = get_q_values(q_table, state, action)
-
-    # Get max q-value in next state (ONLY from the applicable actions!)
-    max_next_q = get_max_q_value(q_table, next_state, applicable_next_actions)
-
-    # Calculate new q-value using Q-Learning formula
-    new_q = (1 - alpha) * old_q + alpha * (reward + gamma * max_next_q)
-
-    # Update the q-table
-    set_q_values(q_table, state, action, new_q)
-
-
-/home/wstewart/Desktop/COSC4368-task4/flattener.py
-#!/usr/bin/env python3
-"""
-flattener.py
-
-Put this script in the root directory you want to scan, then run:
-
-    python flattener.py
-
-It will create (or overwrite) all_files.txt in the same directory.
-"""
-
-import os
-
-def write_all_files_here(out_name: str = "all_files.txt", include_hidden: bool = False) -> None:
-    root_dir = os.path.dirname(os.path.abspath(__file__))
-    out_path = os.path.join(root_dir, out_name)
-
-    with open(out_path, "w", encoding="utf-8", errors="replace") as out_f:
-        for dirpath, dirnames, filenames in os.walk(root_dir):
-            # Skip hidden directories and files unless requested
-            if not include_hidden:
-                dirnames[:] = [d for d in dirnames if not d.startswith('.')]
-                filenames = [f for f in filenames if not f.startswith('.')]
-
-            for fname in filenames:
-                file_path = os.path.join(dirpath, fname)
-                # Skip the output file itself
-                if os.path.abspath(file_path) == os.path.abspath(out_path):
-                    continue
-
-                # Write the file path
-                out_f.write(f"{file_path}\n")
-
-                # Try to read the file as text
-                try:
-                    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
-                        for line in f:
-                            out_f.write(line)
-                except Exception as e:
-                    out_f.write(f"<ERROR: cannot read file: {e}>\n")
-
-                out_f.write("\n")  # blank line between entries
-
-    print(f"Wrote flattened file list to: {out_path}")
-
-
-if __name__ == "__main__":
-    write_all_files_here()
-/home/wstewart/Desktop/COSC4368-task4/visualize.py
-# visualize.py
-# Matplotlib-only helpers for world snapshots, episode traces, distance, and Q arrows.
-# IMPORTANT: One chart per function (no subplots), no seaborn, no custom colors.
-
-from typing import Dict, Iterable, List, Tuple, Callable, Any
-import math
-import matplotlib.pyplot as plt
-
-GridPos = Tuple[int, int]
-State = Tuple  # (i, j, i', j', x, x', a, b, c, d, e, f)
-
-# --- You can tweak these defaults if needed ---
-DEFAULT_GRID = (5, 5)
-
-def extract_positions_from_state(state: State) -> Tuple[GridPos, GridPos]:
-    # Matches your state: (i, j, i', j', ...)
-    return (int(state[0]), int(state[1])), (int(state[2]), int(state[3]))
-
-def _draw_grid(ax, width: int, height: int):
-    ax.set_xlim(0.5, width + 0.5)
-    ax.set_ylim(0.5, height + 0.5)
-    ax.set_xticks(range(1, width + 1))
-    ax.set_yticks(range(1, height + 1))
-    ax.grid(True)
-    ax.set_aspect('equal', adjustable='box')
-    ax.invert_yaxis()
-    ax.set_xlabel('col')
-    ax.set_ylabel('row')
-
-def plot_world(
-    state: State,
-    grid_size: Tuple[int, int] = DEFAULT_GRID,
-    pickup_cells: Iterable[GridPos] = ((3, 5), (4, 2)),
-    dropoff_cells: Iterable[GridPos] = ((1, 1), (1, 5), (3, 3), (5, 5)),
-    position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'PD-World snapshot'
-):
-    width, height = grid_size
-    f_pos, m_pos = position_extractor(state)
-
-    fig, ax = plt.subplots()
-    _draw_grid(ax, width, height)
-
-    for (x, y) in pickup_cells:
-        ax.scatter([x], [y], marker='s', s=200, label='pickup')
-    for (x, y) in dropoff_cells:
-        ax.scatter([x], [y], marker='D', s=200, label='dropoff')
-
-    ax.scatter([f_pos[1]], [f_pos[0]], marker='o', s=200, label='F')  # (row,col) -> (y,x)
-    ax.scatter([m_pos[1]], [m_pos[0]], marker='^', s=200, label='M')
-
-    ax.legend(loc='upper right')
-    ax.set_title(title)
-    plt.show()
-
-def plot_episode_trace(
-    states: List[State],
-    grid_size: Tuple[int, int] = DEFAULT_GRID,
-    pickup_cells: Iterable[GridPos] = ((3, 5), (4, 2)),
-    dropoff_cells: Iterable[GridPos] = ((1, 1), (1, 5), (3, 3), (5, 5)),
-    position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'Episode trace (agent paths)'
-):
-    width, height = grid_size
-    fig, ax = plt.subplots()
-    _draw_grid(ax, width, height)
-
-    f_path: List[GridPos] = []
-    m_path: List[GridPos] = []
-    for s in states:
-        f_pos, m_pos = position_extractor(s)
-        f_path.append(f_pos); m_path.append(m_pos)
-
-    for (x, y) in pickup_cells:
-        ax.scatter([x], [y], marker='s', s=120)
-    for (x, y) in dropoff_cells:
-        ax.scatter([x], [y], marker='D', s=120)
-
-    # paths: convert (row,col) -> (x=col, y=row)
-    if len(f_path) >= 2:
-        xs = [p[1] for p in f_path]; ys = [p[0] for p in f_path]
-        ax.plot(xs, ys, linewidth=2, label='F path')
-    if len(m_path) >= 2:
-        xs = [p[1] for p in m_path]; ys = [p[0] for p in m_path]
-        ax.plot(xs, ys, linewidth=2, linestyle='--', label='M path')
-
-    if f_path:
-        ax.scatter([f_path[0][1]], [f_path[0][0]], s=100, label='F start')
-        ax.scatter([f_path[-1][1]], [f_path[-1][0]], s=100, marker='x', label='F end')
-    if m_path:
-        ax.scatter([m_path[0][1]], [m_path[0][0]], s=100, label='M start')
-        ax.scatter([m_path[-1][1]], [m_path[-1][0]], s=100, marker='x', label='M end')
-
-    ax.legend(loc='upper right')
-    ax.set_title(title)
-    plt.show()
-
-def plot_distance_over_time(
-    states: List[State],
-    position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'Agent Manhattan distance over time'
-):
-    distances: List[int] = []
-    for s in states:
-        (fr, fc), (mr, mc) = position_extractor(s)
-        distances.append(abs(fr - mr) + abs(fc - mc))
-
-    fig, ax = plt.subplots()
-    ax.plot(range(len(distances)), distances)
-    ax.set_xlabel('Step')
-    ax.set_ylabel('Manhattan distance')
-    ax.set_title(title)
-    plt.show()
-
-def _arrow_for_action(action: str) -> Tuple[float, float]:
-    if action == 'north':  return (0, -0.3)
-    if action == 'south':  return (0,  0.3)
-    if action == 'west':   return (-0.3, 0)
-    if action == 'east':   return (0.3,  0)
-    return (0.0, 0.0)  # pickup/dropoff/none
-
-def plot_q_arrows(
-    q_table: Dict[Tuple[Any, str], float],
-    grid_size: Tuple[int, int] = DEFAULT_GRID,
-    for_agent: str = 'F',
-    position_extractor: Callable[[State], Tuple[GridPos, GridPos]] = extract_positions_from_state,
-    title: str = 'Greedy action by cell from Q-table',
-    show_values: bool = True
-):
-    # Aggregate across all states that place the chosen agent at (row,col)
-    width, height = grid_size
-    fig, ax = plt.subplots()
-    _draw_grid(ax, width, height)
-
-    # collect best (action, q) per cell
-    best_per_cell: Dict[GridPos, Tuple[str, float]] = {}
-    for (state, action), q in q_table.items():
-        f_pos, m_pos = position_extractor(state)
-        row, col = (f_pos if for_agent == 'F' else m_pos)
-        cell = (row, col)
-        if cell not in best_per_cell or q > best_per_cell[cell][1]:
-            best_per_cell[cell] = (action, q)
-
-    for (row, col), (action, q) in best_per_cell.items():
-        dx, dy = _arrow_for_action(action)
-        # convert to plotting coords: (x=col, y=row); dy sign is handled by inverted axis
-        ax.arrow(col, row, dx, dy, head_width=0.12, length_includes_head=True)
-        if show_values and math.isfinite(q):
-            ax.text(col, row, f"{q:.2f}", ha='center', va='center')
-
-    ax.set_title(title + f" (agent={for_agent})")
-    plt.show()
-/home/wstewart/Desktop/COSC4368-task4/experiments.py
-# experiments.py
-# Runners for Task 4 Experiments (1–4), plus Q-learning & SARSA updates.
-# Works with:
-#   - world.py exposing: reset(seed), applicable_actions(state,agent), step(state,action,agent), set_pickups(pickups)
-#   - policies.py exposing: prandom, pgreedy, pexploit
-
-import random
-import math
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
-
-# ---- Bind to your project modules ----
-import world as W
-import policies as P
-
-# ---- Types ----
-State = Tuple
-QTable = Dict[Tuple[Any, str], float]
-
-# ---- Q helpers ----
-def q_get(Q: QTable, s: State, a: str) -> float:
-    return Q.get((s, a), 0.0)
-
-def q_set(Q: QTable, s: State, a: str, v: float) -> None:
-    Q[(s, a)] = v
-
-def argmax_q(Q: QTable, state: State, actions: Sequence[str]) -> str:
-    best_q = -math.inf
-    best = []
-    for a in actions:
-        q = q_get(Q, state, a)
-        if q > best_q:
-            best_q = q; best = [a]
-        elif q == best_q:
-            best.append(a)
-    return random.choice(best) if best else random.choice(list(actions))
-
-# ---- Updates ----
-def update_qlearning(Q: QTable, s: State, a: str, r: float, s_next: State, alpha: float, gamma: float,
-                     next_actions: Sequence[str]) -> None:
-    target = r + (gamma * max(q_get(Q, s_next, an) for an in next_actions)) if next_actions else r
-    new_q = (1 - alpha) * q_get(Q, s, a) + alpha * target
-    q_set(Q, s, a, new_q)
-
-def update_sarsa(Q: QTable, s: State, a: str, r: float, s_next: State, a_next: Optional[str],
-                 alpha: float, gamma: float) -> None:
-    target = r + (gamma * q_get(Q, s_next, a_next) if a_next is not None else 0.0)
-    new_q = (1 - alpha) * q_get(Q, s, a) + alpha * target
-    q_set(Q, s, a, new_q)
-
-# ---- Metrics ----
-def manhattan_between_agents(s: State) -> int:
-    # Your state: (i, j, i', j', x, x', a, b, c, d, e, f)
-    return abs(s[0] - s[2]) + abs(s[1] - s[3])
-
-@dataclass
-class EpisodeLog:
-    steps: int
-    total_reward: float
-    avg_manhattan: float
-
-@dataclass
-class RunResult:
-    seed: int
-    total_steps: int
-    terminals_reached: int
-    episodes: List[EpisodeLog]
-    Q: QTable  # final Q
-
-# ---- Core rollout ----
-def rollout(
-    seed: int,
-    total_steps: int,
-    warmup_steps: int,
-    alpha: float,
-    gamma: float,
-    learner: str,                 # 'q' or 'sarsa'
-    schedule_after_warmup: str,   # 'prandom' | 'pgreedy' | 'pexploit'
-) -> RunResult:
-    random.seed(seed)
-    state = W.reset(seed)
-    Q: QTable = {}
-    current_agent = 'F'  # Female starts
-    step_count = 0
-    terminals = 0
-
-    # episode buffers
-    episode_states: List[State] = [state]
-    episode_rewards = 0.0
-    episode_steps = 0
-    episode_dist_sum = 0
-    episodes: List[EpisodeLog] = []
-
-    def pick_policy():
-        if step_count < warmup_steps:
-            return P.prandom
-        return {'prandom': P.prandom, 'pgreedy': P.pgreedy, 'pexploit': P.pexploit}.get(schedule_after_warmup, P.pgreedy)
-
-    while step_count < total_steps:
-        actions = W.applicable_actions(state, current_agent)
-        if not actions:
-            current_agent = 'M' if current_agent == 'F' else 'F'
-            continue
-
-        policy = pick_policy()
-        action = policy(state, actions, Q)
-
-        next_state, reward, done = W.step(state, action, current_agent)
-        step_count += 1
-        episode_steps += 1
-        episode_rewards += reward
-        episode_dist_sum += manhattan_between_agents(next_state)
-        episode_states.append(next_state)
-
-        if learner == 'q':
-            next_actions = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
-            update_qlearning(Q, state, action, reward, next_state, alpha, gamma, next_actions)
-        else:
-            next_actions_curr = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
-            a_next = None
-            if next_actions_curr:
-                a_next = pick_policy()(next_state, next_actions_curr, Q)
-            update_sarsa(Q, state, action, reward, next_state, a_next, alpha, gamma)
-
-        state = next_state
-        current_agent = 'M' if current_agent == 'F' else 'F'
-
-        if done:
-            terminals += 1
-            avg_manh = episode_dist_sum / max(1, episode_steps)
-            episodes.append(EpisodeLog(steps=episode_steps, total_reward=episode_rewards, avg_manhattan=avg_manh))
-            # new episode, keep Q-table
-            state = W.reset(seed + terminals)   # small perturbation per episode
-            episode_states = [state]
-            episode_rewards = 0.0
-            episode_steps = 0
-            episode_dist_sum = 0
-            current_agent = 'F'
-
-    return RunResult(seed=seed, total_steps=step_count, terminals_reached=terminals, episodes=episodes, Q=Q)
-
-# ---- Experiments ----
-def run_experiment1_variant(variant: str, seed: int) -> RunResult:
-    # α=0.3, γ=0.5, 8000 steps, warmup 500; variant = 'prandom'| 'pgreedy' | 'pexploit'
-    return rollout(seed=seed, total_steps=8000, warmup_steps=500,
-                   alpha=0.3, gamma=0.5, learner='q', schedule_after_warmup=variant)
-
-def run_experiment2(seed: int) -> RunResult:
-    # SARSA; same as 1(c): post-warmup PGREEDY
-    return rollout(seed=seed, total_steps=8000, warmup_steps=500,
-                   alpha=0.3, gamma=0.5, learner='sarsa', schedule_after_warmup='pgreedy')
-
-def run_experiment3(seed: int, base: str = 'q') -> RunResult:
-    # like 1(c) if base='q' or like 2 if base='sarsa' but α=0.15, γ=0.45
-    learner = 'q' if base == 'q' else 'sarsa'
-    return rollout(seed=seed, total_steps=8000, warmup_steps=500,
-                   alpha=0.15, gamma=0.45, learner=learner, schedule_after_warmup='pgreedy')
-
-def run_experiment4(seed: int, base: str = 'q') -> RunResult:
-    # Start like 1(c) or 2; after 3rd terminal, set_pickups([(1,2),(4,5)]); continue to 6th
-    random.seed(seed)
-    state = W.reset(seed)
-    Q: QTable = {}
-    current_agent = 'F'
-    step_count = 0
-    terminals = 0
-
-    alpha, gamma = 0.3, 0.5
-    warmup_steps = 500
-    learner = 'q' if base == 'q' else 'sarsa'
-
-    episode_states: List[State] = [state]
-    episode_rewards = 0.0
-    episode_steps = 0
-    episode_dist_sum = 0
-    episodes: List[EpisodeLog] = []
-
-    def pick_policy():
-        if step_count < warmup_steps:
-            return P.prandom
-        return P.pgreedy
-
-    # generous cap to avoid infinite loops
-    while terminals < 6 and step_count < 20000:
-        actions = W.applicable_actions(state, current_agent)
-        if not actions:
-            current_agent = 'M' if current_agent == 'F' else 'F'
-            continue
-
-        action = pick_policy()(state, actions, Q)
-        next_state, reward, done = W.step(state, action, current_agent)
-        step_count += 1
-        episode_steps += 1
-        episode_rewards += reward
-        episode_dist_sum += manhattan_between_agents(next_state)
-        episode_states.append(next_state)
-
-        if learner == 'q':
-            next_actions = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
-            update_qlearning(Q, state, action, reward, next_state, alpha, gamma, next_actions)
-        else:
-            next_actions_curr = W.applicable_actions(next_state, 'M' if current_agent == 'F' else 'F')
-            a_next = None
-            if next_actions_curr:
-                a_next = pick_policy()(next_state, next_actions_curr, Q)
-            update_sarsa(Q, state, action, reward, next_state, a_next, alpha, gamma)
-
-        state = next_state
-        current_agent = 'M' if current_agent == 'F' else 'F'
-
-        if done:
-            terminals += 1
-            avg_manh = episode_dist_sum / max(1, episode_steps)
-            episodes.append(EpisodeLog(steps=episode_steps, total_reward=episode_rewards, avg_manhattan=avg_manh))
-
-            if terminals == 3:
-                W.set_pickups([(1, 2), (4, 5)])  # change pickups, keep Q
-
-            state = W.reset(seed + terminals)
-            episode_states = [state]
-            episode_rewards = 0.0
-            episode_steps = 0
-            episode_dist_sum = 0
-            current_agent = 'F'
-
-    return RunResult(seed=seed, total_steps=step_count, terminals_reached=terminals, episodes=episodes, Q=Q)
-
-# ---- Two-run helpers ----
-def two_runs(fn_runner: Callable[[int], RunResult], seed_a: int, seed_b: int):
-    return fn_runner(seed_a), fn_runner(seed_b)
-
-def two_runs_exp1_prandom(seed_a: int = 7, seed_b: int = 19):
-    return two_runs(lambda s: run_experiment1_variant('prandom', s), seed_a, seed_b)
-
-def two_runs_exp1_pgreedy(seed_a: int = 7, seed_b: int = 19):
-    return two_runs(lambda s: run_experiment1_variant('pgreedy', s), seed_a, seed_b)
-
-def two_runs_exp1_pexploit(seed_a: int = 7, seed_b: int = 19):
-    return two_runs(lambda s: run_experiment1_variant('pexploit', s), seed_a, seed_b)
-
-def two_runs_exp2(seed_a: int = 11, seed_b: int = 23):
-    return two_runs(run_experiment2, seed_a, seed_b)
-
-def two_runs_exp3(base: str = 'q', seed_a: int = 13, seed_b: int = 29):
-    return two_runs(lambda s: run_experiment3(s, base=base), seed_a, seed_b)
-
-def two_runs_exp4(base: str = 'q', seed_a: int = 17, seed_b: int = 31):
-    return two_runs(lambda s: run_experiment4(s, base=base), seed_a, seed_b)
-
-# ---- Pretty summary ----
-def summarize_run(run: RunResult) -> str:
-    lines = [
-        f"Seed: {run.seed}",
-        f"Total Steps: {run.total_steps}",
-        f"Terminals: {run.terminals_reached}",
-    ]
-    if run.episodes:
-        avg_reward = sum(e.total_reward for e in run.episodes) / len(run.episodes)
-        avg_len = sum(e.steps for e in run.episodes) / len(run.episodes)
-        avg_manh = sum(e.avg_manhattan for e in run.episodes) / len(run.episodes)
-        lines += [
-            f"Avg Reward/episode: {avg_reward:.2f}",
-            f"Avg Steps/episode: {avg_len:.1f}",
-            f"Avg Manhattan/step: {avg_manh:.2f}",
-        ]
-    return "\n".join(lines)
-
-if __name__ == "__main__":
-    # smoke test (comment out if you prefer)
-    r1a, r1b = two_runs_exp1_pgreedy()
-    print("=== Exp1(c) PGREEDY ===")
-    print(summarize_run(r1a)); print(summarize_run(r1b))
-/home/wstewart/Desktop/COSC4368-task4/README.md
-# COSC4368-task4
-
-```
-python3 main.py --exp 1b
-python3 main.py --exp 1c
-python3 main.py --exp 1d
-python3 main.py --exp 2
-python3 main.py --exp 3q
-python3 main.py --exp 3sarsa
-python3 main.py --exp 4q
-python3 main.py --exp 4sarsa
-```
-
-/home/wstewart/Desktop/COSC4368-task4/__pycache__/q_learning.cpython-313.pyc
-�
-
-    ��i�  �                   ��   � S r SSKrSSKrSSKJrJrJr  S rS\S\S\	S\
-4S	 jrS\S\S\	S
-\
-4S jrS\S\S\\	   S
-\	4S
- jr
-S\S\S\\	   S
-\
-4S jrS\S\	S
-\4S jrS\S\S\	S\
-S\S\\	   S\
-S\
-4S jrg)a  
-Everything in this file is related to Q_learning
-contains the algorithm and the means to update tables
-
-for reference:
-State format: (i, j, i', j', x, x', a, b, c, d, e, f)
-    - (i,j): Female agent position
-    - (i',j'): Male agent position
-    - x: Female carrying block (0 or 1)
-    - x': Male carrying block (0 or 1)
-    - a: blocks in dropoff (1,1)
-    - b: blocks in dropoff (1,5)
-    - c: blocks in dropoff (3,3)
-    - d: blocks in pickup (3,5)
-    - e: blocks in pickup (4,2)
-    - f: blocks in dropoff (5,5)
-�    N)�Tuple�Set�Dictc                  �   � 0 $ )N� r   �    �3/home/wstewart/Desktop/COSC4368-task4/q_learning.py�create_q_tabler
-      s   � �
-�Ir   �q_table�state�action�valuec                 �   � X4nX0U'   g)zm
-q_table: Dictionary storing Q-values
-state: Simplified state tuple
-action: Action string
-value: New Q-value
-Nr   )r   r   r
-   r   �keys        r	   �set_q_valuesr      s   � � �/�C��C�Lr   �returnc                 �,   � X4nU R                  US5      $ )zv
-q_table: Dictionary storing q-values
-state: Simplified state tuple (i, j, x, delta_i, delta_j)
-action: Action string
-�        )�get)r   r   r
-   r   s       r	   �get_q_valuesr   &   s   � � �/�C��;�;�s�C� � r   �applicable_actionsc                 ��   � 0 nU H  n[        XU5      nXSU'   M     [        UR                  5       5      n/ nUR                  5        H  u  pEXV:X  d  M  UR	                  U5        M     [
-        R                  " U5      $ )z�
-Return action with highest Q-value from applicable actions.
-Breaks ties randomly.
-
-q_table: Dictionary storing Q-values
-state: Simplified state tuple
-applicable_actions: Set of valid actions
-)r   �max�values�items�append�random�choice)r   r   r   �
-action_q_valsr
-   �q_value�	max_value�best_actions           r	   �get_best_actionr#   0   s}   � � �M�$���w�v�6�� '�f�� %�
- �M�(�(�*�+�I� �K�(�.�.�0��������v�&� 1� �=�=��%�%r   c                 �x   � U(       d  g/ nU H   n[        XU5      nUR                  U5        M"     [        U5      $ )z�
-Return the highest Q-value among applicable actions.
-this function is for returning the number for q-learning formula
-
-q_table: Dictionary storing Q-values
-state: Simplified state tuple
-applicable_actions: Set of valid actions
-
-r   )r   r   r   )r   r   r   �q_valuesr
-   r    s         r	   �get_max_q_valuer&   K   s?   � � �� �H�$���w�v�6������ � %�
- �x�=�r   �
-full_state�agentc                 �T   � U u  p#pEpgp�p�p�US:X  a
-  X$-
-  nX5-
-  nX#XnU4$ XB-
-  nXS-
-  nXEX~U4$ )ax  
-simplify the state to only use what is needed for the q-learning algorithm
-refer to the top of this code to see what the full state is and what variables mean what
-simplified state space : (i, j, x, delta_i, delta_j) is the end result
-    - (i, j) = agent position
-    - x = agent carrying block (boolean)
-    - delta_i, delta_j = Relative row/column position to other agent
-�Fr   )r'   r(   �i�j�i_prime�j_prime�x�x_prime�a�b�c�d�e�f�delta_i�delta_js                   r	   �simplify_stater9   b   sV   � � <F�8�A�'�A��a�A� 
-��|��+���+���Q��(�(��+���+����7�:�:r   �reward�
-next_state�applicable_next_actions�alpha�gammac                 �p   � [        XU5      n[        XU5      n	SU-
-  U-  XcXy-  -   -  -   n
-[        XX*5        g)u  
-Formula: Q(s,a) ← (1-α)*Q(s,a) + α*[R + γ*max Q(s',a')]
-
-q_table: Dictionary storing Q-values
-    state: Current simplified state
-    action: Action taken
-    reward: Immediate reward received
-    next_state: Next simplified state
-    applicable_next_actions: Set of valid actions in next state
-    alpha: Learning rate (0 < α ≤ 1)
-    gamma: Discount factor (0 ≤ γ ≤ 1)
-
-    note from slides:
-        "a’ has to be an applicable operator in s’; e.g. pickup and drop-off are not
-        applicable in a pickup/dropoff states if empty/full! The q-values of
-        non-applicable operators are therefore not considered! "
-�   N)r   r&   r   )r   r   r
-   r:   r;   r<   r=   r>   �old_q�
-max_next_q�new_qs              r	   �update_q_learningrD   w   sK   � �2 
-���0�E� !��6M�N�J� ��Y�%��%�E�4F�+F�"G�G�E� ���/r   )�__doc__�numpy�npr   �typingr   r   r   r
-   �str�floatr   r   r#   r&   r9   rD   r   r   r	   �<module>rK      s  ���$ � 
-� #� #��	�$� 	�u� 	�c� 	�%� 	�!�$� !�u� !�c� !�e� !�&�T� &�%� &�S��X� &�RU� &�6�T� �%� �S��X� �RW� �.;�u� ;�S� ;�U� ;�*"0�t� "0�!�"0� �"0� #�"0� "'�	"0�
- /2�#�h�"0� "�
-"0� "�"0r   
-/home/wstewart/Desktop/COSC4368-task4/__pycache__/experiments.cpython-313.pyc
-�
-
-    �i�'  �                   �.  � S SK r S SKrS SKJr  S SKJrJrJrJrJ	r	J
-r
-Jr  S SKr
-S SKr\r\\\\4   \4   rS\S\S\S\4S jrS\S\S\S	\SS4
-S
- jrS\S\S\
-\   S\4S
- jrS\S\S\S\S\S\S\S\
-\   SS4S jrS\S\S\S\S\S\	\   S\S\SS4S jrS\S\4S jr\ " S S5      5       r\ " S S5      5       rS\S\S\S\S\S\S\S\4S  jrS!\S\S\4S" jrS\S\4S# jrS5S\S$\S\4S% jjr S5S\S$\S\4S& jjr!S'\\/\4   S(\S)\4S* jr"S6S(\S)\4S+ jjr#S6S(\S)\4S, jjr$S6S(\S)\4S- jjr%S7S(\S)\4S. jjr&S8S$\S(\S)\4S/ jjr'S9S$\S(\S)\4S0 jjr(S1\S\4S2 jr)\*S3:X  a/  \$" 5       u  r+r,\-" S45        \-" \)" \+5      5        \-" \)" \,5      5        gg):�    N)�	dataclass)�Any�Callable�Dict�List�Optional�Sequence�Tuple�Q�s�a�returnc                 �(   � U R                  X4S5      $ )N�        )�get)r   r   r
-   s      �4/home/wstewart/Desktop/COSC4368-task4/experiments.py�q_getr      s   � ��5�5�!�����    �vc                 �   � X0X4'   g �N� )r   r   r
-   r   s       r   �q_setr      s   � ��q�f�Ir   �state�actionsc                 �  � [         R                  * n/ nU H2  n[        XU5      nXc:�  a  Uo5/nM  Xc:X  d  M!  UR                  U5        M4     U(       a  [        R
-                  " U5      $ [        R
-                  " [
-        U5      5      $ r   )�math�infr   �append�random�choice�list)r   r   r   �best_q�bestr
-   �qs          r   �argmax_qr&      sk   � ��h�h�Y�F�
-�D�
-���!�A����:��F�s��
-�[��K�K��N� � #'�6�=�=���H�F�M�M�$�w�-�,H�Hr   �r�s_next�alpha�gamma�next_actionsc                 �   ^ ^� U(       a  X6[        U U4S jU 5       5      -  -   OUnSU-
-  [        T X5      -  XX-  -   n	[        T XU	5        g )Nc              3   �>   >#   � U  H  n[        TTU5      v �  M     g 7fr   )r   )�.0�anr   r(   s     ��r   �	<genexpr>�#update_qlearning.<locals>.<genexpr>)   s   �� � �J�\�r�e�A�v�r�2�2�\�s   ��   )�maxr   r   )
-r   r   r
-   r'   r(   r)   r*   r+   �target�new_qs
-   `   `     r   �update_qlearningr6   '   sG   �� �O[�Q�#�J�\�J�J�J�
-K�ab�F�
-��Y�%��1�.�(�5�>�9�E�	�!�Q�5�r   �a_nextc                 �v   � X5b  U[        XU5      -  OS-   nSU-
-  [        XU5      -  Xh-  -   n	[        XX)5        g )Nr   r2   )r   r   )
-r   r   r
-   r'   r(   r7   r)   r*   r4   r5   s
-             r   �update_sarsar9   -   sB   � �
-�6H�%�%��6�2�2�c�
-R�F�
-��Y�%��a�.�(�5�>�9�E�	�!��r   c                 �T   � [        U S   U S   -
-  5      [        U S   U S   -
-  5      -   $ )Nr   �   r2   �   )�abs�r   s    r   �manhattan_between_agentsr?   4   s/   � ��q��t�a��d�{��c�!�A�$��1��+�.�.�.r   c                   �4   � \ rS rSr% \\S'   \\S'   \\S'   Srg)�
-EpisodeLog�8   �steps�total_reward�
-avg_manhattanr   N)�__name__�
-__module__�__qualname__�__firstlineno__�int�__annotations__�float�__static_attributes__r   r   r   rA   rA   8   s   � ��J����r   rA   c                   �N   � \ rS rSr% \\S'   \\S'   \\S'   \\   \S'   \\S'   Sr	g)	�	RunResult�>   �seed�total_steps�terminals_reached�episodesr   r   N)
-rF   rG   rH   rI   rJ   rK   r   rA   �QTablerM   r   r   r   rO   rO   >   s#   � �
-
-�I������:���
-�Ir   rO   rQ   rR   �warmup_steps�learner�schedule_after_warmupc           
-      �  ^^^� [         R                  " U 5        [        R                  " U 5      n0 nSn	SmSn
-U/nSnSn
-Sn/ nUUU4S jnTU:  Gam  [        R                  " Xy5      nU(       d  U	S:X  a  SOSn	M0  U" 5       nU" UUU5      n[        R
-                  " UUU	5      u  nnnTS-
-  mU
-S-
-  n
-UU-
-  nU[
-        U5      -
-  nUR                  U5        US:X  a0  [        R                  " UU	S:X  a  SOS5      n[        X�UUUX4U5        OG[        R                  " UU	S:X  a  SOS5      nS nU(       a  U" 5       " UUU5      n[        X�UUUUX45        UnU	S:X  a  SOSn	U(       aP  U
-S-
-  n
-U[        SU
-5      -  nUR                  [        X�US95        [        R                  " X
--   5      nU/nSnSn
-SnSn	TU:  a  GMm  [        U TX�US	9$ )
-N�Fr   r   c                  ��   >� TT:  a  [         R                  $ [         R                  [         R                  [         R                  S.R	                  T [         R                  5      $ )N)�prandom�pgreedy�pexploit)�Pr\   r]   r^   r   )rX   �
-step_countrV   s   ���r   �pick_policy�rollout.<locals>.pick_policy^   sC   �� ���$��9�9���9�9�����
-�
-�S�W�W�Xm�op�ox�ox�y�yr   �Mr2   r%   �rC   rD   rE   �rQ   rR   rS   rT   r   )
-r    rQ   �W�reset�applicable_actions�stepr?   r   r6   r9   r3   rA   rO   )rQ   rR   rV   r)   r*   rW   rX   r   r   �
-current_agent�	terminals�episode_states�episode_rewards�
-episode_steps�episode_dist_sumrT   ra   r   �policy�action�
-next_state�reward�doner+   �next_actions_currr7   �avg_manhr`   s     `   `                    @r   �rolloutrw   G   s�  �� � �K�K���
-�G�G�D�M�E��A��M��J��I� $)�'�N��O��M���!#�H�z�
- �{�
-"��&�&�u�<���#0�C�#7�C�S�M�������w��*��#$�6�6�%���#G� �
-�F�D��a��
-����
-��6�!���4�Z�@�@�����j�)��c�>��/�/�
-�=�TW�CW�C�]`�a�L��Q�v�v�z�5�Q]�^� !� 4� 4�Z�
-�Y\�H\��be� f���F� �$��z�3D�a�H����6�6�:�v�u�T���,��3���
-����N�I�'�#�a��*?�?�H��O�O�J�]�hp�q�r��G�G�D�,�-�E�#�W�N�!�O��M� ���M�O �{�
-"�R �$�J�)�jk�l�lr   �variantc           
-      �    � [        USSSSSU S9$ )N�@  ��  �333333�?�      �?r%   �rQ   rR   rV   r)   r*   rW   rX   �rw   )rx   rQ   s     r   �run_experiment1_variantr�   �   s    � ���$�S��C��G�U� Ur   c           
-      �    � [        U SSSSSSS9$ )Nrz   r{   r|   r}   �sarsar]   r~   r   )rQ   s    r   �run_experiment2r�   �   s!   � ���$�S��C��PY�[� [r   �basec           
-      �4   � US:X  a  SOSn[        U SSSSUSS9$ )	Nr%   r�   rz   r{   g333333�?g�������?r]   r~   r   )rQ   r�   rW   s      r   �run_experiment3r�   �   s.   � ��S�[�c�g�G���$�S��T�7�R[�]� ]r   c           
-      �  ^^� [         R                  " U 5        [        R                  " U 5      n0 nSnSmSnSu  pgSmUS:X  a  SOSnU/n	Sn
-SnSn/ n
-UU4S jnUS	:  Ga�  TS
-:  Ga�  [        R                  " X$5      nU(       d  US:X  a  SOSnM7  U" 5       " X/U5      n[        R
-                  " UUU5      u  nnnTS-
-  mUS-
-  nU
-U-
-  n
-U[
-        U5      -
-  nU	R                  U5        US:X  a0  [        R                  " UUS:X  a  SOS5      n[        X2UUUXgU5        OG[        R                  " UUS:X  a  SOS5      nS nU(       a  U" 5       " UUU5      n[        X2UUUUXg5        UnUS:X  a  SOSnU(       an  US-
-  nU[        SU5      -  nU
-R                  [        X�US
-95        US:X  a  [        R                  " SS/5        [        R                  " X-   5      nU/n	Sn
-SnSnSnUS	:  a	  TS
-:  a  GM�  [        U TX]US9$ )NrZ   r   )r|   r}   r{   r%   r�   r   c                  �P   >� T T:  a  [         R                  $ [         R                  $ r   )r_   r\   r]   )r`   rV   s   ��r   ra   �$run_experiment4.<locals>.pick_policy�   s   �� ���$��9�9���y�y�r   �   i N  rc   r2   rd   r<   )r2   r;   )�   �   re   )r    rQ   rf   rg   rh   ri   r?   r   r6   r9   r3   rA   �set_pickupsrO   )rQ   r�   r   r   rj   rk   r)   r*   rW   rl   rm   rn   ro   rT   ra   r   rq   rr   rs   rt   r+   ru   r7   rv   r`   rV   s                           @@r   �run_experiment4r�   �   s0  �� �
-�K�K���
-�G�G�D�M�E��A��M��J��I��L�E��L��S�[�c�g�G�#(�'�N��O��M���!#�H�� �a�-�J��.��&�&�u�<���#0�C�#7�C�S�M����u�q�1��#$�6�6�%���#G� �
-�F�D��a��
-����
-��6�!���4�Z�@�@�����j�)��c�>��/�/�
-�=�TW�CW�C�]`�a�L��Q�v�v�z�5�Q]�^� !� 4� 4�Z�
-�Y\�H\��be� f���F� �$��z�3D�a�H����6�6�:�v�u�T���,��3���
-����N�I�'�#�a��*?�?�H��O�O�J�]�hp�q�r��A�~��
-�
-�v�v�.�/��G�G�D�,�-�E�#�W�N�!�O��M� ���M�Q �a�-�J��.�T �$�J�)�jk�l�lr   �	fn_runner�seed_a�seed_bc                 �"   � U " U5      U " U5      4$ r   r   )r�   r�   r�   s      r   �two_runsr�   �   s   � ��V��i��/�/�/r   c                 �   � [        S X5      $ )Nc                 �   � [        SU 5      $ )Nr\   �r�   r>   s    r   �<lambda>�'two_runs_exp1_prandom.<locals>.<lambda>�   �   � �5�i��Cr   �r�   �r�   r�   s     r   �two_runs_exp1_prandomr�   �   �   � ��C�V�T�Tr   c                 �   � [        S X5      $ )Nc                 �   � [        SU 5      $ )Nr]   r�   r>   s    r   r�   �'two_runs_exp1_pgreedy.<locals>.<lambda>�   r�   r   r�   r�   s     r   �two_runs_exp1_pgreedyr�   �   r�   r   c                 �   � [        S X5      $ )Nc                 �   � [        SU 5      $ )Nr^   r�   r>   s    r   r�   �(two_runs_exp1_pexploit.<locals>.<lambda>�   s   � �5�j�!�Dr   r�   r�   s     r   �two_runs_exp1_pexploitr�   �   s   � ��D�f�U�Ur   c                 �"   � [        [        X5      $ r   )r�   r�   r�   s     r   �
-two_runs_exp2r�   �   s   � ��O�V�4�4r   c                 �$   ^ � [        U 4S jX5      $ )Nc                 �   >� [        U TS9$ �N)r�   )r�   �r   r�   s    �r   r�   �two_runs_exp3.<locals>.<lambda>�   �   �� �o�a�d�;r   r�   �r�   r�   r�   s   `  r   �
-two_runs_exp3r�   �   �   �� ��;�V�L�Lr   c                 �$   ^ � [        U 4S jX5      $ )Nc                 �   >� [        U TS9$ r�   )r�   r�   s    �r   r�   �two_runs_exp4.<locals>.<lambda>�   r�   r   r�   r�   s   `  r   �
-two_runs_exp4r�   �   r�   r   �runc                 ��  � SU R                    3SU R                   3SU R                   3/nU R                  (       a�  [	        S U R                   5       5      [        U R                  5      -  n[	        S U R                   5       5      [        U R                  5      -  n[	        S U R                   5       5      [        U R                  5      -  nUSUS 3S	US
- 3SUS 3/-
-  nSR
-                  U5      $ )
-NzSeed: z
-Total Steps: zTerminals: c              3   �8   #   � U  H  oR                   v �  M     g 7fr   )rD   �r.   �es     r   r0   � summarize_run.<locals>.<genexpr>  s   � � �>��A�����   �c              3   �8   #   � U  H  oR                   v �  M     g 7fr   )rC   r�   s     r   r0   r�     s   � � �4�|�!�g�g�|�r�   c              3   �8   #   � U  H  oR                   v �  M     g 7fr   )rE   r�   s     r   r0   r�     s   � � �=��1����r�   zAvg Reward/episode: z.2fzAvg Steps/episode: z.1fzAvg Manhattan/step: �
-)rQ   rR   rS   rT   �sum�len�join)r�   �lines�
-avg_reward�avg_lenrv   s        r   �
-summarize_runr�   �   s�   � �
-����
-��
-����(�)�
-�c�+�+�,�-�
-�E�
- �|�|��>����>�>��S�\�\�AR�R�
-��4�s�|�|�4�4�s�3�<�<�7H�H���=����=�=��C�L�L�@Q�Q��
-�"�:�c�"2�3�!�'�#��/�"�8�C�.�1�
-� 	
-��
- �9�9�U��r   �__main__z=== Exp1(c) PGREEDY ===)r%   )�   �   )�   �   )r%   �
-   �   )r%   �   �   ).r    r   �dataclassesr   �typingr   r   r   r   r   r	   r
-   �worldrf   �policiesr_   �State�strrL   rU   r   r   r&   r6   r9   rJ   r?   rA   rO   rw   r�   r�   r�   r�   r�   r�   r�   r�   r�   r�   r�   r�   rF   �r1a�r1b�printr   r   r   �<module>r�      so  �� � � !� G� G� G� � � 	��	
-�e�C��H�o�u�$�	%���V� �� �#� �%� ��V� �� �#� �%� �D� �	I�� 	I�u� 	I�x��}� 	I�� 	I��� �5� �S� �U� �E� �RW� �`e� �#+�C�=��59���F� �u� �� �� �� �x�X[�}� ���&+��04��/�� /�#� /� �� � ��
- �� � ��Em�
-
-�Em��Em� �Em� �	Em�
- �Em� �
-Em� �Em� �Em�PU�S� U�� U�	� U�
-[�#� [�)� [�
-]�#� ]�S� ]�9� ]�Cm�#� Cm�S� Cm�9� Cm�L0��#��	�!1�2� 0�C� 0�� 0�U�#� U�3� U�U�#� U�3� U�V�3� V�C� V�5�#� 5�C� 5�M�� M�3� M�S� M�M�� M�3� M�S� M��y� �S� �" �z��$�&�H�C��	�
-#�$�	�-��
-��u�]�3�%7�8�	 r   
-/home/wstewart/Desktop/COSC4368-task4/__pycache__/world.cpython-313.pyc
-�
-
-    ��i  �            
-       �|  � % S SK r S SKJrJrJrJr  SrSS/q\\\\4      \	S'   / SQr
-\\\\4      \	S'   SrS	r/ S
-Qr
-SrSrSrS
-\4S jrS\S
-\4S jrS\S\S
-\\\4   4S jrS\S\S
-\4S jrS\S
-\\\4   4S jrS\S\S
-\\   4S jrS\S\S\S
-\\\4   4S jrSS\4S jjrS\S\4S jrS\S\S\4S jrS rg)�    N)�Tuple�Set�Dict�List�   )�   r   )�   �   �PICKUP_LOCATIONS)��   r
-   �r
-   r   �r   r   �r   r   �DROPOFF_LOCATIONS�
-   )�north�south�east�west�pickup�dropoff������
-   �returnc                  �   � g)z�
-Initial state:
-  F at (1,3), M at (5,3), both not carrying;
-  dropoffs a,b,c,f start at 0;
-  pickup-slot counts d,e start at 10 each.
-)r
-   r   r   r   r   r   r   r   r   r   r   r   � r   �    �./home/wstewart/Desktop/COSC4368-task4/world.py�get_initial_stater    +   s   � � :r   �statec                 �   � U u            pp4  pU[         :H  =(       a)    U[         :H  =(       a    U[         :H  =(       a	    U[         :H  $ )z5
-Terminal when all dropoffs hit capacity: a=b=c=f=5.
-)�DROPOFF_CAPACITY)r!   �_�a�b�c�fs         r   �is_terminal_stater)   6   sV   � � */�&�A�q�!�Q��1��q�!�
-�!�!� 
-&��%�%�
-&��%�%�
-&� �%�%�'r   �agentc                 �$   � U tp#pEnUS:X  a  X#4$ XE4$ )z)
-Return (row, col) for agent 'F' or 'M'.
-�Fr   )r!   r*   �i�j�i_p�j_pr$   s          r   �get_agent_positionr1   A   s%   � � ��A�#�Q��c�\�A�6�1��z�1r   c                 �$   � U t      p#pBUS:X  a  U$ U$ )z/
-Return carry flag (0/1) for agent 'F' or 'M'.
-r,   r   )r!   r*   r$   �x�x_ps        r   �get_agent_carryingr5   I   s%   � � #��A�q�!�Q�3����1�%�#�%r   c                 �"   � U Gt pp4pVnUUUUUUS.$ )z/
-Human-readable dict of block counts at sites.
-)�dropoff_1_1�dropoff_1_5�dropoff_3_3�pickup_slot0�pickup_slot1�dropoff_5_5r   )r!   r$   r%   r&   r'   �d�er(   s           r   �get_block_countsr?   Q   s.   � � !��Q�1��q�������
-� r   c                 �  � U u  p#pEpgp�p�p�US:X  a  X#p�UnXEnnOXEp�UnX#nn[        5       nUS:�  a   US-
-  U:X  a  UU:X  d  UR                  S5        U[        :  a   US-   U:X  a  UU:X  d  UR                  S5        U[        :  a   UU:X  a	  US-   U:X  d  UR                  S5        US:�  a   UU:X  a	  US-
-  U:X  d  UR                  S5        US:X  a]  X�4[        [        S   5      :X  a  US:�  a  UR                  S5        O.X�4[        [        S   5      :X  a  US:�  a  UR                  S5        US:X  a�  X�4S	:X  a  U[
-        :  a  UR                  S
-5        U$ X�4S:X  a  U	[
-        :  a  UR                  S
-5        U$ X�4S:X  a  U
-[
-        :  a  UR                  S
-5        U$ X�4S
-:X  a  U
-[
-        :  a  UR                  S
-5        U$ )z�
-Applicable operators for agent in current state.
-Enforces:
-  - 1..GRID_SIZE boundaries
-  - no occupying same cell
-  - pickup only at pickup cells with stock and not carrying
-  - dropoff only at dropoff cells with capacity and carrying
-r,   r
-   r   r   r   r   r   r   r   r   r   r   r   )�set�add�	GRID_SIZE�tupler   r#   )r!   r*   r-   r.   r/   r0   r3   r4   r%   r&   r'   r=   r>   r(   �r�col�carrying�other_r�other_c�opss                       r   �aploprK   d   s�  � � 05�,�A�#�A�A�!����|��3��������3�������E�C� 	�1�u�a�!�e�w�&�3�'�>�������9�}�a�!�e�w�.�3�'�>������
-�Y���W���q��G�1C������
-�Q�w��W���q��G�);������ �1�}�
-�8�u�-�a�0�1�1�a�!�e��G�G�H���X��/��2�3�
-3��A���G�G�H�� �1�}�
-�8�v��!�&6�"6��G�G�I�� �J� �X��
-�A�(8�$8��G�G�I�� �J� �X��
-�A�(8�$8��G�G�I�� �J� �X��
-�A�(8�$8��G�G�I���Jr   �actionc                 �  � U u  p4pVpxp�p�p�X4nnXVnnXxnnX�X�X�4u  nnnnnnUS:X  a  X4nnUnOXVnnUnSnUS:X  a  US:X  a  US-
-  nOUS-
-  n[         nO�US:X  a  US:X  a  US-   nOUS-   n[         nO�US:X  a  US:X  a  US-   nOUS-   n[         nO�US:X  a  US:X  a  US-
-  nOUS-
-  n[         nO�US:X  aM  US:X  a  SnOSnUU4[        [        S   5      :X  a  US-
-  nOUU4[        [        S   5      :X  a  U
-S-
-  n[        nONUS	:X  aH  US:X  a  SnOSnUU4S
-:X  a  U	S-   nO)UU4S:X  a  U
-S-   nOUU4S:X  a  US-   nO
-UU4S
-:X  a  US-   n[        nUUUUUUUUUUUU4nUU4$ )z^
-Apply action for the given agent. Assumes action is applicable.
-Returns (new_state, reward).
-r,   r   r   r
-   r   r   r   r   r   r   r   r   r   )�REWARD_MOVErD   r   �
-REWARD_PICKUP�REWARD_DROPOFF) r!   rL   r*   r-   r.   r/   r0   r3   r4   r%   r&   r'   r=   r>   r(   �new_i�new_j�new_i_p�new_j_p�new_x�new_x_p�new_a�new_b�new_c�new_d�new_e�new_frE   rF   rG   �reward�	new_states                                    r   �applyr_   �   s  � �
- 05�,�A�#�A�A�!�� �5�E��W�G��7�E�/0�Q�1�/?�,�E�5�%���u� 
-��|��3�����3����
-�F�
-����C�<���E�E��!�e�G���	�7�	��C�<���E�E��!�e�G���	�6�	��C�<��!�G�E��A�g�G���	�6�	��C�<��!�G�E��A�g�G���	�8�	��C�<��E��G� 
-�s�8�u�-�a�0�1�1���E�E���X��/��2�3�
-3���E�E���	�9�	��C�<��E��G�
-�s�8�v����E�E���X��
-���E�E���X��
-���E�E���X��
-���E�E��� 	�u�g�w�
-�w��u�e�
-�u�e��I�
- �f��r   �seedc                 �B   � [         R                  " U 5        [        5       $ )zJReset world and return the initial state. Seed accepted for compatibility.)�randomr`   r    )r`   s    r   �resetrc   �   s   � �
-�K�K�����r   c                 �   � [        X5      $ )z0Adapter name expected by runners; wraps aplop().)rK   )r!   r*   s     r   �applicable_actionsre     s
-   � ����r   c                 �<   � [        XU5      u  p4[        U5      nX4U4$ )zE
-One environment step for agent. Returns (next_state, reward, done).
-)r_   r)   )r!   rL   r*   �
-next_stater]   �dones         r   �stepri   	  s(   � � �u�e�4��J��Z�(�D��t�#�#r   c                 �   � [        U [        [        45      (       a  [        U 5      S:w  a  [	        S5      e[        U S   5      [        U S   5      /qg)z�
-Experiment 4 hook: change pickup coordinates WITHOUT touching d/e counts in the state.
-The two slot counts (d,e) always map to PICKUP_LOCATIONS[0] and [1], respectively.
-r
-   zGset_pickups expects exactly two pickup coordinates, e.g., [(1,2),(4,5)]r   r
-   N)�
-isinstance�listrD   �len�
-ValueErrorr   )�pickupss    r   �set_pickupsrp     sI   � � �g��e�}�-�-��W���1B��b�c�c��g�a�j�)�5����+<�=�r   )r   )rb   �typingr   r   r   r   rC   r   �int�__annotations__r   r#   �INITIAL_PICKUP_BLOCKS�ACTIONSrN   rO   rP   r    �boolr)   �strr1   r5   r?   rK   r_   rc   re   ri   rp   r   r   r   �<module>rx      s{  �� � )� )� 
-�	� ,2�6�*:� �$�u�S�#�X��'� :� ,L� �4��c�3�h��(� K� � �� � B�� ���
-���:�5� :�'�U� '�t� '�2�e� 2�C� 2�E�#�s�(�O� 2�&�e� &�C� &�C� &��E� �d�3��8�n� �&5�� 5�s� 5�s�3�x� 5�xW�� W�� W�C� W�E�%��*�4E� W�|�� ��e� �C� �
-$�� $�s� $�3� $�>r   
-/home/wstewart/Desktop/COSC4368-task4/__pycache__/policies.cpython-313.pyc
-�
-
-    %�if  �                   �  � S SK JrJrJrJr  S SKrS SKr\rS\\   S\\   4S jr	S\\\\4   \
-4   S\S\S\
-4S	 jrS\\\\4   \
-4   S\S\\   S\4S
- jrS\S\\   S\S\4S
- jr
-S\S\\   S\S\4S jrSS\S\\   S\S\
-S\4
-S jjrS\S\\   S\S\4S jrS\S\\   S\S\4S jrSS\S\\   S\S\
-S\4
-S jjrg)�    )�Iterable�Dict�Tuple�ListN�actions�returnc                 �@   � [        U 5      nU(       d  [        S5      eU$ )Nz No applicable actions available.)�list�
-ValueError)r   �lsts     �1/home/wstewart/Desktop/COSC4368-task4/policies.py�_as_listr      s   � �
-�w�-�C���;�<�<��J�    �Q�state�actionc                 �(   � U R                  X4S5      $ )Ng        )�get)r   r   r   s      r
-   �_qr      s   � ��5�5�%��#�&�&r   c                 �  � [        U5      n[        R                  * n/ nU H3  n[        XU5      nXt:�  a  UnU/nM  Xt:X  d  M"  UR	                  U5        M5     U(       a  [
-        R                  " U5      $ [
-        R                  " U5      $ �N)r   �math�infr   �append�random�choice)r   r   r   �acts�best_q�best�a�qs           r
-   �_best_actionr"      ss   � ��G��D��h�h�Y�F��D�
-���q��O���:��F��3�D�
-�[��K�K��N�
- � #'�6�=�=���?�F�M�M�$�,?�?r   �applicable_actions�q_tablec                 �`   � [        U5      nSU;   a  gSU;   a  g[        R                  " U5      $ )zN
-PRANDOM: If pickup or dropoff is applicable, do it; otherwise choose random.
-�pickup�dropoff)r   r   r   �r   r#   r$   r   s       r
-   �prandomr)   #   s4   � � �&�'�D��4����D����=�=���r   c                 �L   � [        U5      nSU;   a  gSU;   a  g[        X U5      $ )zc
-PGREEDY: If pickup/dropoff is applicable, do it; otherwise choose argmax-Q (break ties randomly).
-r&   r'   )r   r"   r(   s       r
-   �pgreedyr+   .   s2   � � �&�'�D��4����D������-�-r   �epsilonc                 �   � [        U5      nSU;   a  gSU;   a  g[        R                  " 5       U:  a  [        R                  " U5      $ [        X U5      $ )z�
-PEXPLOIT: If pickup/dropoff is applicable, do it; otherwise:
-  - with probability (1 - epsilon) pick greedy action
-  - with probability epsilon pick a random applicable action
-Default epsilon=0.2 matches spec's 80/20 split.
-r&   r'   )r   r   r   r"   )r   r#   r$   r,   r   s        r
-   �pexploitr.   9   sO   � � �&�'�D��4����D���
-�}�}��� ��}�}�T�"�"����-�-r   c                 �   � [        XU5      $ r   )r)   �r   r#   r$   s      r
-   �PRandomr1   M   �   � ��5�g�6�6r   c                 �   � [        XU5      $ r   )r+   r0   s      r
-   �PGreedyr4   P   r2   r   c                 �   � [        XX#S9$ )N)r,   )r.   )r   r#   r$   r,   s       r
-   �PExploitr6   S   s   � ��E�w�H�Hr   )g�������?)�typingr   r   r   r   r   r   �State�strr   �floatr   r"   r)   r+   r.   r1   r4   r6   � r   r
-   �<module>r<      s�  �� .� .� 
-� �
-���h�s�m� ��S�	� �'�$�u�U�C�Z� �%�'�
-(� '�� '�� '�� '�@�D��u�c�z�*�E�1�2� @�5� @�8�TW�=� @�]`� @�"	�5� 	�h�s�m� 	�d� 	�s� 	�	.�5� 	.�h�s�m� 	.�d� 	.�s� 	.�.�E� .�x��}� .�t� .�V[� .�fi� .�(7�5� 7�h�s�m� 7�d� 7�s� 7�7�5� 7�h�s�m� 7�d� 7�s� 7�I�E� I�x��}� I�t� I�V[� I�fi� Ir   
-/home/wstewart/Desktop/COSC4368-task4/__pycache__/visualize.cpython-313.pyc
-�
-
-    �i  �                   ��  � S SK JrJrJrJrJrJr  S SKrS SKJ	r
-  \\\4   r\r
-SrS\
-S\\\4   4S jrS\S\4S	 jr\S
-S\S4S\
-S
-\\\4   S\\   S\\   S\\
-/\\\4   4   S\4S jjr\S
-S\S4S\\
-   S
-\\\4   S\\   S\\   S\\
-/\\\4   4   S\4S jjr\S4S\\
-   S\\
-/\\\4   4   S\4S jjrS\S\\\4   4S jr\S\SS4S\\\\4   \4   S
-\\\4   S\S\\
-/\\\4   4   S\S\4S  jjrg)!�    )�Dict�Iterable�List�Tuple�Callable�AnyN��   r
-   �state�returnc                 �r   � [        U S   5      [        U S   5      4[        U S   5      [        U S   5      44$ )Nr   �   �   �   )�int)r   s    �2/home/wstewart/Desktop/COSC4368-task4/visualize.py�extract_positions_from_stater      s7   � ���a��M�3�u�Q�x�=�)�C��a��M�3�u�Q�x�=�+I�I�I�    �width�heightc                 �v  � U R                  SUS-   5        U R                  SUS-   5        U R                  [        SUS-   5      5        U R	                  [        SUS-   5      5        U R                  S5        U R
-                  SSS9  U R                  5         U R                  S5        U R                  S5        g )	Ng      �?r   T�equal�box)�
-adjustable�col�row)
-�set_xlim�set_ylim�
-set_xticks�range�
-set_yticks�grid�
-set_aspect�invert_yaxis�
-set_xlabel�
-set_ylabel)�axr   r   s      r   �
-_draw_gridr(      s�   � ��K�K��U�S�[�!��K�K��V�c�\�"��M�M�%��5�1�9�%�&��M�M�%��6�A�:�&�'��G�G�D�M��M�M�'�e�M�,��O�O���M�M�%���M�M�%�r   ))r   r
-   )�   r   ))r   r   )r   r
-   )r   r   r	   zPD-World snapshot�	grid_size�pickup_cells�
-dropoff_cells�position_extractor�titlec           	      �  � Uu  pgU" U 5      u  p�[         R                  " 5       u  p�[        X�U5        U H  u  p�UR                  U/U
-/SSSS9  M     U H  u  p�UR                  U/U
-/SSSS9  M     UR                  US   /US   /S	SS
-S9  UR                  U	S   /U	S   /SSSS9  UR	                  S
-S9  UR                  U5        [         R                  " 5         g )N�s��   �pickup)�markerr0   �label�D�dropoffr   r   �o�F�^�M�upper right��loc)�plt�subplotsr(   �scatter�legend�	set_title�show)r   r*   r+   r,   r-   r.   r   r   �f_pos�m_pos�figr'   �x�ys                 r   �
-plot_worldrI      s�   � � �M�E�%�e�,�L�E��l�l�n�G�C��r�&�!����
-�
-�
-�A�3���C�3�h�
-�?� ����
-�
-�
-�A�3���C�3�i�
-�@�  � �J�J��a��z�E�!�H�:�c�S��J�D��J�J��a��z�E�!�H�:�c�S��J�D��I�I�-�I� ��L�L����H�H�Jr   zEpisode trace (agent paths)�statesc                 �$  � Uu  pg[         R                  " 5       u  p�[        X�U5        / n
-/ nU  H/  nU" U5      u  p�U
-R                  U
-5        UR                  U5        M1     U H  u  nnU	R	                  U/U/SSS9  M     U H  u  nnU	R	                  U/U/SSS9  M     [        U
-5      S:�  a<  U
- Vs/ s H  nUS   PM
-     nnU
- Vs/ s H  nUS   PM
-     nnU	R
-                  UUSSS	9  [        U5      S:�  a=  U Vs/ s H  nUS   PM
-     nnU Vs/ s H  nUS   PM
-     nnU	R
-                  UUSS
-SS9  U
-(       aA  U	R	                  U
-S   S   /U
-S   S   /S
-SS9  U	R	                  U
-S   S   /U
-S   S   /S
-SSS9  U(       aA  U	R	                  US   S   /US   S   /S
-SS9  U	R	                  US   S   /US   S   /S
-SSS9  U	R                  SS9  U	R                  U5        [         R                  " 5         g s  snf s  snf s  snf s  snf )Nr0   �x   )r3   r0   r5   r   r   r   zF path)�	linewidthr4   z--zM path)rM   �	linestyler4   �d   zF start)r0   r4   �����rG   zF end)r0   r3   r4   zM startzM endr;   r<   )
-r>   r?   r(   �appendr@   �len�plotrA   rB   rC   )rJ   r*   r+   r,   r-   r.   r   r   rF   r'   �f_path�m_pathr0   rD   rE   rG   rH   �p�xs�yss                       r   �plot_episode_tracerY   8   s&  � � �M�E��l�l�n�G�C��r�&�!��F��F�
-��)�!�,����
-�
-�e��f�m�m�E�2� � ���A�
-�
-�
-�A�3���C�3�
-�/� ����A�
-�
-�
-�A�3���C�3�
-�/�  � �6�{�a��"�
-#�F�q�a��d�F��
-#��*@��A�1�Q�4��R�*@�
-����B�!�8��4�
-�6�{�a��"�
-#�F�q�a��d�F��
-#��*@��A�1�Q�4��R�*@�
-����B�!�t�8��D�
-�
-�
-�
-�F�1�I�a�L�>�F�1�I�a�L�>�S�	�
-�J�
-�
-�
-�F�2�J�q�M�?�V�B�Z��]�O�s�3�g�
-�V�
-�
-�
-�
-�F�1�I�a�L�>�F�1�I�a�L�>�S�	�
-�J�
-�
-�
-�F�2�J�q�M�?�V�B�Z��]�O�s�3�g�
-�V��I�I�-�I� ��L�L����H�H�J�� $��*@�� $��*@s   �4G>�	H�?H�H
-z"Agent Manhattan distance over timec                 �  � / nU  H<  nU" U5      u  u  pVu  pxUR                  [        XW-
-  5      [        Xh-
-  5      -   5        M>     [        R                  " 5       u  p�U
-R	                  [        [
-        U5      5      U5        U
-R                  S5        U
-R                  S5        U
-R                  U5        [        R                  " 5         g )N�StepzManhattan distance)rQ   �absr>   r?   rS   r    rR   r%   r&   rB   rC   )rJ   r-   r.   �	distancesr0   �fr�fc�mr�mcrF   r'   s              r   �plot_distance_over_timerb   b   s�   � �
- �I�
-��/��2����(�2�����R�W���B�G��4�5� � �l�l�n�G�C��G�G�E�#�i�.�!�9�-��M�M�&���M�M�&�'��L�L����H�H�Jr   �actionc                 �<   � U S:X  a  gU S:X  a  gU S:X  a  gU S:X  a  gg	)
-N�north)r   �333333ӿ�south)r   �333333�?�west)rf   r   �east)rh   r   )�        rk   � )rc   s    r   �_arrow_for_actionrm   s   s-   � �
-���)�
-���)�
-���)�
-���)�r   r8   z"Greedy action by cell from Q-tableT�q_table�	for_agent�show_valuesc           
-      �H  � Uu  pg[         R                  " 5       u  p�[        X�U5        0 n
-U R                  5        H<  u  u  p�n
-U" U5      u  p�US:X  a  UOUu  nnUU4nUU
-;  d
-  X�U   S   :�  d  M6  X�4U
-U'   M>     U
-R                  5        Hh  u  u  nnu  p�[	        U5      u  nnU	R                  UUUUSSS9  U(       d  M6  [        R                  " U
-5      (       d  MS  U	R                  UUU
-S SSS9  Mj     U	R                  US	U S
-3-   5        [         R                  " 5         g )Nr8   r   g���Q��?T)�
-head_width�length_includes_headz.2f�center)�ha�vaz (agent=�))r>   r?   r(   �itemsrm   �arrow�math�isfinite�textrB   rC   )rn   r*   ro   r-   r.   rp   r   r   rF   r'   �
-best_per_cellr   rc   �qrD   rE   r   r   �cell�dx�dys                        r   �
-plot_q_arrowsr�   z   s"  � � �M�E��l�l�n�G�C��r�&�!� 79�M�%�m�m�o�����)�%�0���&�#�-�E�5���S��S�z���}�$��$�,?��,B�(B�#)�+�M�$�� .� $1�#6�#6�#8��
-��c�K�V�"�6�*���B�
-����c�2�r�d���N��;�4�=�=��+�+��G�G�C���3��X�(�G�C� $9� �L�L��8�I�;�a�0�0�1��H�H�Jr   )�typingr   r   r   r   r   r   rz   �matplotlib.pyplot�pyplotr>   r   �GridPos�State�DEFAULT_GRIDr   r(   �strrI   rY   rb   �floatrm   �boolr�   rl   r   r   �<module>r�      s-  ��
- >� =� � �
-��S��/��
-�� ��J�� J�%���8H�2I� J�	�#� 	�s� 	� ".�&6�'G�Ea�$�
-����S�#�X��� �7�#�� �G�$�	�
- !�%��%���0@�*A�!A�B�� �
-�8 ".�&6�'G�Ea�.�
-(���K�(��S�#�X��(� �7�#�(� �G�$�	(�
- !�%��%���0@�*A�!A�B�(� �
-(�X Fb�5����K�� �%��%���0@�*A�!A�B�� ��"�c� �e�E�5�L�&9� � ".��Ea�5��
-�
-�%��S��/�5�(�
-)���S�#�X��� �� !�%��%���0@�*A�!A�B�	�
- �� �
-r   
