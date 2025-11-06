@@ -1,62 +1,84 @@
-from typing import Tuple, Set, Dict
+# policies.py
+from typing import Iterable, Dict, Tuple, List
 import random
-from q_learning import *
+import math
 
-def PRandom(state: Tuple, applicable_actions: Set[str], q_table: Dict) -> str:
+State = Tuple  # your state tuple
+
+def _as_list(actions: Iterable[str]) -> List[str]:
+    lst = list(actions)
+    if not lst:
+        raise ValueError("No applicable actions available.")
+    return lst
+
+def _q(Q: Dict[Tuple[State, str], float], state: State, action: str) -> float:
+    # experiments.py stores Q with keys: (state, action)
+    return Q.get((state, action), 0.0)
+
+def _best_action(Q: Dict[Tuple[State, str], float], state: State, actions: Iterable[str]) -> str:
+    acts = _as_list(actions)
+    best_q = -math.inf
+    best: List[str] = []
+    for a in acts:
+        q = _q(Q, state, a)
+        if q > best_q:
+            best_q = q
+            best = [a]
+        elif q == best_q:
+            best.append(a)
+    return random.choice(best) if best else random.choice(acts)
+
+# ---------------------------
+# Policies used by the project
+# ---------------------------
+
+def prandom(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
     """
-    if the agent has the option to pickup or dropoff, select it
-    applicable_actions: Set of valid actions
+    PRANDOM: If pickup or dropoff is applicable, do it; otherwise choose random.
     """
-    if 'pickup' in applicable_actions:
+    acts = _as_list(applicable_actions)
+    if 'pickup' in acts:
         return 'pickup'
-
-    if 'dropoff' in applicable_actions:
+    if 'dropoff' in acts:
         return 'dropoff'
+    return random.choice(acts)
 
-    # if the above 2 actions are not an option select from the ones in the set
-    actions = list(applicable_actions) # needs to be in a list for random.choice
-    return random.choice(actions)
-
-
-def PExploit(state: Tuple, applicable_actions: Set[str], q_table: Dict, epsilon: float = 0.15) -> str:
-
+def pgreedy(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
     """
-    if the agent has the option to pickup or dropoff, select it
-    otherwise, apply the applicable operator with the highest q-value with a 85% probability
-    and choose randomly with a 15% probability
+    PGREEDY: If pickup/dropoff is applicable, do it; otherwise choose argmax-Q (break ties randomly).
     """
-
-    if 'pickup' in applicable_actions:
+    acts = _as_list(applicable_actions)
+    if 'pickup' in acts:
         return 'pickup'
-
-    if 'dropoff' in applicable_actions:
+    if 'dropoff' in acts:
         return 'dropoff'
+    return _best_action(q_table, state, acts)
 
-    # Generate random number between 0 and 1. This will get the .85 and .15 probabilities needed for this policy
-    random_value = random.random()
-
-    if random_value < epsilon:
-        # Choose randomly
-        actions = list(applicable_actions) # needs to be in a list for random.choice
-        return random.choice(actions)
-    else:
-        # Choose best Q-value
-        return get_best_action(q_table, state, applicable_actions)
-
-
-def PGreedy(state: Tuple, applicable_actions: Set[str], q_table: Dict) -> str:
+def pexploit(state: State, applicable_actions: Iterable[str], q_table: Dict, epsilon: float = 0.2) -> str:
     """
-    If pickup and dropoff is applicable, choose this
-    operator; otherwise, apply the applicable operator with the
-    highest q-value (break ties by rolling a dice for operators
-    with the same utility)
+    PEXPLOIT: If pickup/dropoff is applicable, do it; otherwise:
+      - with probability (1 - epsilon) pick greedy action
+      - with probability epsilon pick a random applicable action
+    Default epsilon=0.2 matches spec's 80/20 split.
     """
-
-    if 'pickup' in applicable_actions:
+    acts = _as_list(applicable_actions)
+    if 'pickup' in acts:
         return 'pickup'
-
-    if 'dropoff' in applicable_actions:
+    if 'dropoff' in acts:
         return 'dropoff'
+    if random.random() < epsilon:
+        return random.choice(acts)
+    return _best_action(q_table, state, acts)
 
-    # return action with highest q-value
-    return get_best_action(q_table, state, applicable_actions)
+# ---------------------------
+# Backward-compatible aliases (your older code can still call these)
+# ---------------------------
+
+def PRandom(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
+    return prandom(state, applicable_actions, q_table)
+
+def PGreedy(state: State, applicable_actions: Iterable[str], q_table: Dict) -> str:
+    return pgreedy(state, applicable_actions, q_table)
+
+def PExploit(state: State, applicable_actions: Iterable[str], q_table: Dict, epsilon: float = 0.2) -> str:
+    return pexploit(state, applicable_actions, q_table, epsilon=epsilon)

@@ -1,30 +1,33 @@
-# everything here is related to the PD-World
-# The grid size, Its dropoff and pickup locations, initial state, terminal state, agent positions,
-# block counts at locations allowed to have blocks
-# determine the rules for how an agent moves in the world
+# world.py
+# PD-World: 2-agent block transport environment
+# State format: (i, j, i', j', x, x', a, b, c, d, e, f)
+#   (i, j)   : Female agent position (row, col) in 1..GRID_SIZE
+#   (i', j') : Male agent position (row, col)
+#   x, x'    : Carry flags (0/1) for F and M
+#   a, b, c  : Blocks at dropoffs (1,1), (1,5), (3,3)
+#   d, e     : Blocks at the 2 pickup "slots" (mapped to current PICKUP_LOCATIONS[0/1])
+#   f        : Blocks at dropoff (5,5)
 
 import random
-import copy
-from typing import Tuple, Set, Dict # for hints/better documentation
+from typing import Tuple, Set, Dict, List
 
-'''
-===========================================================
-WORLD STATE SETUP
-===========================================================
-'''
+# ===========================================================
+# World configuration
+# ===========================================================
 
-# Max of grid dimensions
-GRID_SIZE = 5   #Valid positions are (1,1) to (5,5). The alop() function will enforce that boundary - 5x5
+GRID_SIZE = 5  # valid rows/cols are 1..5 inclusive
 
-# Pickup and dropoff locations
-PICKUP_LOCATIONS = [(3, 5), (4, 2)]
-DROPOFF_LOCATIONS = [(1, 1), (1, 5), (3, 3), (5, 5)]
+# These coordinates can change during Exp 4 via set_pickups()
+PICKUP_LOCATIONS: List[Tuple[int, int]] = [(3, 5), (4, 2)]
 
-# Initial configuration for blocks and drop off site
-INITIAL_PICKUP_BLOCKS = 10
+# Dropoffs are fixed
+DROPOFF_LOCATIONS: List[Tuple[int, int]] = [(1, 1), (1, 5), (3, 3), (5, 5)]
+
+# Capacities and initial counts
 DROPOFF_CAPACITY = 5
+INITIAL_PICKUP_BLOCKS = 10  # for both pickup slots at start
 
-# Action definitions
+# Actions
 ACTIONS = ['north', 'south', 'east', 'west', 'pickup', 'dropoff']
 
 # Rewards
@@ -32,300 +35,248 @@ REWARD_MOVE = -1
 REWARD_PICKUP = 13
 REWARD_DROPOFF = 13
 
+
+# ===========================================================
+# State helpers
+# ===========================================================
+
 def get_initial_state() -> Tuple:
     """
-    Returns the initial state of the PD-World.
-
-    State format: (i, j, i', j', x, x', a, b, c, d, e, f)
-    - (i,j): Female agent position
-    - (i',j'): Male agent position
-    - x: Female carrying block (0 or 1)
-    - x': Male carrying block (0 or 1)
-    - a: blocks in dropoff (1,1)
-    - b: blocks in dropoff (1,5)
-    - c: blocks in dropoff (3,3)
-    - d: blocks in pickup (3,5)
-    - e: blocks in pickup (4,2)
-    - f: blocks in dropoff (5,5)
+    Initial state:
+      F at (1,3), M at (5,3), both not carrying;
+      dropoffs a,b,c,f start at 0;
+      pickup-slot counts d,e start at 10 each.
     """
-    return (1, 3, 5, 3, 0, 0, 0, 0, 0, 10, 10, 0)
+    # (i, j,  i', j',  x, x',  a, b, c,  d,  e,  f)
+    return (1, 3,   5, 3,   0, 0,   0, 0, 0,  10, 10,  0)
 
 
 def is_terminal_state(state: Tuple) -> bool:
     """
-    Check if the state is a terminal state.
-    Terminal state: all dropoff locations have 5 blocks each.
-
-    Args:
-        state: Full state tuple
-
-    Returns:
-        bool: True if terminal state reached
+    Terminal when all dropoffs hit capacity: a=b=c=f=5.
     """
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
-
-    return a == 5 and b == 5 and c == 5 and f == 5
+    _, _, _, _, _, _, a, b, c, _, _, f = state
+    return (a == DROPOFF_CAPACITY
+            and b == DROPOFF_CAPACITY
+            and c == DROPOFF_CAPACITY
+            and f == DROPOFF_CAPACITY)
 
 
 def get_agent_position(state: Tuple, agent: str) -> Tuple[int, int]:
     """
-    Extract agent position from state.
-
-    Args:
-        state: Full state tuple
-        agent: 'F' for female, 'M' for male
-
-    Returns:
-        Tuple[int, int]: (row, column) position
+    Return (row, col) for agent 'F' or 'M'.
     """
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
-    if agent == 'F':
-        return (i, j)
-    else:
-        return (i_prime, j_prime)
+    i, j, i_p, j_p, *_ = state
+    return (i, j) if agent == 'F' else (i_p, j_p)
 
 
 def get_agent_carrying(state: Tuple, agent: str) -> int:
     """
-    Check if agent is carrying a block.
-
-    Args:
-        state: Full state tuple
-        agent: 'F' or 'M'
-
-    Returns:
-        int: 1 if carrying, 0 if not
+    Return carry flag (0/1) for agent 'F' or 'M'.
     """
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
-    if agent == 'F':
-        return x
-    else:
-        return x_prime
+    _, _, _, _, x, x_p, *_ = state
+    return x if agent == 'F' else x_p
 
 
-def get_block_counts(state: Tuple) -> Dict:
+def get_block_counts(state: Tuple) -> Dict[str, int]:
     """
-    Extract block counts from state.
-
-    Args:
-        state: Full state tuple
-
-    Returns:
-        Dict: Block counts for each location
+    Human-readable dict of block counts at sites.
     """
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
+    *_, a, b, c, d, e, f = state
     return {
         'dropoff_1_1': a,
         'dropoff_1_5': b,
         'dropoff_3_3': c,
-        'pickup_3_5': d,
-        'pickup_4_2': e,
-        'dropoff_5_5': f
+        'pickup_slot0': d,  # mapped to PICKUP_LOCATIONS[0]
+        'pickup_slot1': e,  # mapped to PICKUP_LOCATIONS[1]
+        'dropoff_5_5': f,
     }
 
 
-'''
-===========================================================
-AGENT MOVEMENT
-===========================================================
-'''
+# ===========================================================
+# Action applicability
+# ===========================================================
 
 def aplop(state: Tuple, agent: str) -> Set[str]:
     """
-    Returns the set of applicable operators for the given agent in the given state.
-
+    Applicable operators for agent in current state.
     Enforces:
-    - Grid boundaries (can't leave 5x5 grid)
-    - Pickup conditions (must be at pickup location, location has blocks, not carrying)
-    - Dropoff conditions (must be at dropoff location, location not full, carrying block)
-    - Collision avoidance (can't move to cell occupied by other agent)
-
-    Args:
-        state: Full state tuple (i, j, i', j', x, x', a, b, c, d, e, f)
-        agent: 'F' for female agent, 'M' for male agent
-
-    Returns:
-        Set[str]: Set of applicable operators for an agent - {'north', 'south', 'pickup'}
+      - 1..GRID_SIZE boundaries
+      - no occupying same cell
+      - pickup only at pickup cells with stock and not carrying
+      - dropoff only at dropoff cells with capacity and carrying
     """
+    i, j, i_p, j_p, x, x_p, a, b, c, d, e, f = state
 
-    # Unpack the state
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
+    if agent == 'F':
+        r, col = i, j
+        carrying = x
+        other_r, other_c = i_p, j_p
+    else:
+        r, col = i_p, j_p
+        carrying = x_p
+        other_r, other_c = i, j
 
-    # Get the current agents position and carry status
-    if agent == 'F': # female
-        agent_row, agent_col = i, j
-        agent_carrying = x
-        other_row, other_col = i_prime, j_prime
-    else: # male
-        agent_row, agent_col = i_prime, j_prime
-        agent_carrying = x_prime
-        other_row, other_col = i, j
+    ops: Set[str] = set()
 
-    # All movement actions
-    applicable_operators = set()
+    # Move north
+    if r > 1 and not (r - 1 == other_r and col == other_c):
+        ops.add('north')
+    # Move south
+    if r < GRID_SIZE and not (r + 1 == other_r and col == other_c):
+        ops.add('south')
+    # Move east
+    if col < GRID_SIZE and not (r == other_r and col + 1 == other_c):
+        ops.add('east')
+    # Move west
+    if col > 1 and not (r == other_r and col - 1 == other_c):
+        ops.add('west')
 
-    # Check if agent can move north - not at the top edge boundary
-    if agent_row > 1:
-        new_row = agent_row - 1
-        # check if other agent is north of agent
-        if not(new_row == other_row and agent_col == other_col):
-            applicable_operators.add('north')
+    # Pickup (dynamic positions)
+    if carrying == 0:
+        if (r, col) == tuple(PICKUP_LOCATIONS[0]) and d > 0:
+            ops.add('pickup')
+        elif (r, col) == tuple(PICKUP_LOCATIONS[1]) and e > 0:
+            ops.add('pickup')
 
-    # Check if agent can move south - not at the bottom edge boundary
-    if agent_row < GRID_SIZE:
-        new_row = agent_row + 1
-        # check if other agent is south of agent
-        if not (new_row == other_row and agent_col == other_col):
-            applicable_operators.add('south')
+    # Dropoff (fixed positions)
+    if carrying == 1:
+        if (r, col) == (1, 1) and a < DROPOFF_CAPACITY:
+            ops.add('dropoff')
+        elif (r, col) == (1, 5) and b < DROPOFF_CAPACITY:
+            ops.add('dropoff')
+        elif (r, col) == (3, 3) and c < DROPOFF_CAPACITY:
+            ops.add('dropoff')
+        elif (r, col) == (5, 5) and f < DROPOFF_CAPACITY:
+            ops.add('dropoff')
 
-    # Check if agent can move east - not at the right edge boundary
-    if agent_col < GRID_SIZE:
-        new_col = agent_col + 1
-        # check if other agent is east of agent
-        if not (agent_row == other_row and new_col == other_col):
-            applicable_operators.add('east')
-
-    # Check if agent can move west - not at the left edge boundary
-    if agent_col > 1:
-        new_col = agent_col - 1
-        # check if other agent is west of agent
-        if not (agent_row == other_row and new_col == other_col):
-            applicable_operators.add('west')
-
-    # Check pickup location
-    #  Conditions: must be at pickup location, location has blocks, and not carrying block
-    if agent_carrying == 0: # not carrying block
-        if(agent_row, agent_col) == (3, 5) and d > 0:
-            applicable_operators.add('pickup')
-        elif (agent_row, agent_col) == (4, 2) and e > 0:
-            applicable_operators.add('pickup')
-
-    # Check DROPOFF
-
-    if agent_carrying == 1:  # Is carrying a block
-        if (agent_row, agent_col) == (1, 1) and a < DROPOFF_CAPACITY:
-            applicable_operators.add('dropoff')
-        elif (agent_row, agent_col) == (1, 5) and b < DROPOFF_CAPACITY:
-            applicable_operators.add('dropoff')
-        elif (agent_row, agent_col) == (3, 3) and c < DROPOFF_CAPACITY:
-            applicable_operators.add('dropoff')
-        elif (agent_row, agent_col) == (5, 5) and f < DROPOFF_CAPACITY:
-            applicable_operators.add('dropoff')
-
-    return applicable_operators
+    return ops
 
 
-# a decision will be made after receiving the result from aplop() then call apply()
-
+# ===========================================================
+# Transition
+# ===========================================================
 
 def apply(state: Tuple, action: str, agent: str) -> Tuple[Tuple, int]:
     """
-    Apply the given action for the specified agent, returning new state and reward.
-
-    This function assumes the action is applicable (should be checked by aplop first).
-
-    see get_initial_state() for explanation of letter variables
-
-    Args:
-        state: Current full state tuple
-        action: Action to apply ('north', 'south', 'east', 'west', 'pickup', 'dropoff')
-        agent: Which agent is acting ('F' or 'M')
-
-    Returns:
-        Tuple[Tuple, int]: (new_state, reward)
-            - new_state: Updated state tuple after action
-            - reward: Immediate reward for this action
+    Apply action for the given agent. Assumes action is applicable.
+    Returns (new_state, reward).
     """
-    # unpack the state
-    i, j, i_prime, j_prime, x, x_prime, a, b, c, d, e, f = state
+    i, j, i_p, j_p, x, x_p, a, b, c, d, e, f = state
 
-    # Start with current state values
+    # copy locals
     new_i, new_j = i, j
-    new_i_prime, new_j_prime = i_prime, j_prime
-    new_x, new_x_prime = x, x_prime
+    new_i_p, new_j_p = i_p, j_p
+    new_x, new_x_p = x, x_p
     new_a, new_b, new_c, new_d, new_e, new_f = a, b, c, d, e, f
 
-    # Default reward
+    # Current agent snapshot
+    if agent == 'F':
+        r, col = i, j
+        carrying = x
+    else:
+        r, col = i_p, j_p
+        carrying = x_p
+
     reward = 0
 
-    # Determine which agent to move
-    if agent == 'F': # female
-        agent_row, agent_col = i, j
-        agent_carrying = x
-    else:  # male
-        agent_row, agent_col = i_prime, j_prime
-        agent_carrying = x_prime
-
-    # Execute action
     if action == 'north':
-        # decrease row (up)
         if agent == 'F':
-            new_i = agent_row - 1
+            new_i = r - 1
         else:
-            new_i_prime = agent_row - 1
+            new_i_p = r - 1
         reward = REWARD_MOVE
 
     elif action == 'south':
-        # increase row (down)
         if agent == 'F':
-            new_i = agent_row + 1
+            new_i = r + 1
         else:
-            new_i_prime = agent_row + 1
+            new_i_p = r + 1
         reward = REWARD_MOVE
 
     elif action == 'east':
-        # increase column (right)
         if agent == 'F':
-            new_j = agent_col + 1
+            new_j = col + 1
         else:
-            new_j_prime = agent_col + 1
+            new_j_p = col + 1
         reward = REWARD_MOVE
 
     elif action == 'west':
-        # decrease column (left)
         if agent == 'F':
-            new_j = agent_col - 1
+            new_j = col - 1
         else:
-            new_j_prime = agent_col - 1
+            new_j_p = col - 1
         reward = REWARD_MOVE
 
     elif action == 'pickup':
-        # Set carrying status to 1
         if agent == 'F':
             new_x = 1
         else:
-            new_x_prime = 1
+            new_x_p = 1
 
-        # Decrease block count of pickup location
-        if (agent_row, agent_col) == (3, 5):
+        # Decrement whichever pickup slot matches current coordinate
+        if (r, col) == tuple(PICKUP_LOCATIONS[0]):
             new_d = d - 1
-        elif (agent_row, agent_col) == (4, 2):
+        elif (r, col) == tuple(PICKUP_LOCATIONS[1]):
             new_e = e - 1
 
         reward = REWARD_PICKUP
 
     elif action == 'dropoff':
-        # Set carrying status to 0
         if agent == 'F':
             new_x = 0
         else:
-            new_x_prime = 0
+            new_x_p = 0
 
-        # Increase block count of the dropoff location
-        if (agent_row, agent_col) == (1, 1):
+        if (r, col) == (1, 1):
             new_a = a + 1
-        elif (agent_row, agent_col) == (1, 5):
+        elif (r, col) == (1, 5):
             new_b = b + 1
-        elif (agent_row, agent_col) == (3, 3):
+        elif (r, col) == (3, 3):
             new_c = c + 1
-        elif (agent_row, agent_col) == (5, 5):
+        elif (r, col) == (5, 5):
             new_f = f + 1
 
         reward = REWARD_DROPOFF
 
-    # Update state of the world
-    new_state = (new_i, new_j, new_i_prime, new_j_prime,
-                 new_x, new_x_prime, new_a, new_b, new_c,
-                 new_d, new_e, new_f)
-
+    new_state = (
+        new_i, new_j, new_i_p, new_j_p,
+        new_x, new_x_p, new_a, new_b, new_c,
+        new_d, new_e, new_f
+    )
     return new_state, reward
+
+
+# ===========================================================
+# Adapters for experiment runners
+# ===========================================================
+
+def reset(seed: int = 0):
+    """Reset world and return the initial state. Seed accepted for compatibility."""
+    random.seed(seed)
+    return get_initial_state()
+
+
+def applicable_actions(state: Tuple, agent: str):
+    """Adapter name expected by runners; wraps aplop()."""
+    return aplop(state, agent)
+
+
+def step(state: Tuple, action: str, agent: str):
+    """
+    One environment step for agent. Returns (next_state, reward, done).
+    """
+    next_state, reward = apply(state, action, agent)
+    done = is_terminal_state(next_state)
+    return next_state, reward, done
+
+
+def set_pickups(pickups):
+    """
+    Experiment 4 hook: change pickup coordinates WITHOUT touching d/e counts in the state.
+    The two slot counts (d,e) always map to PICKUP_LOCATIONS[0] and [1], respectively.
+    """
+    global PICKUP_LOCATIONS
+    if not isinstance(pickups, (list, tuple)) or len(pickups) != 2:
+        raise ValueError("set_pickups expects exactly two pickup coordinates, e.g., [(1,2),(4,5)]")
+    PICKUP_LOCATIONS = [tuple(pickups[0]), tuple(pickups[1])]
