@@ -1,0 +1,6 @@
+Seed: 7
+Total Steps: 8000
+Terminals: 8
+Avg Reward/episode: -379.88
+Avg Steps/episode: 939.9
+Avg Manhattan/episode: 3.24
